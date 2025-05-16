@@ -140,6 +140,54 @@ def agent_heartbeat(name: str):
     return {"message": f"Heartbeat updated for {name}"}
 """
 
-main_py_path.write_text(full_main_py)
+pipeline_logic = """
+@app.post("/pipeline")
+async def full_pipeline(req: BuildTriggerRequest):
+    try:
+        # Step 1: Get build plan from PlanAgent
+        plan_agent = get_agent("PlanAgent")
+        if not plan_agent:
+            raise HTTPException(status_code=404, detail="PlanAgent not registered")
+        response = requests.get(f"{plan_agent['endpoint']}/plan", params={"project": req.project})
+        plan = response.json()
+        tasks = plan.get("tasks", [])
 
-"ForgeIQ backend main.py file rewritten with complete agent orchestration logic and task execution endpoint."
+        # Step 2: Execute each task
+        results = []
+        for task in tasks:
+            agent_name = f"{task.lower()}-agent".replace("_", "-")
+            agent = get_agent(agent_name.capitalize())
+            if not agent:
+                results.append({
+                    "task": task,
+                    "status": "skipped",
+                    "reason": f"{agent_name} not registered"
+                })
+                continue
+            try:
+                exec_resp = requests.post(f"{agent['endpoint']}/execute", json={"project": req.project, "task": task})
+                results.append({
+                    "task": task,
+                    "status": "completed",
+                    "result": exec_resp.json()
+                })
+            except Exception as e:
+                results.append({
+                    "task": task,
+                    "status": "failed",
+                    "reason": str(e)
+                })
+
+        return {
+            "project": req.project,
+            "strategy": plan.get("strategy", "N/A"),
+            "results": results
+        }
+
+    except Exception as e:
+        return {"error": f"Pipeline execution failed: {str(e)}"}
+"""
+Only append if not already present
+if "async def full_pipeline" not in main_content:
+    main_content = main_content.strip() + "\n\n" + pipeline_logic
+    main_path.write_text(main_content)
