@@ -1,4 +1,4 @@
-# agents/CodeNavAgent/app/weaviate_client.py
+# agents/CodeNavAgent/weaviate_client.py
 import weaviate
 import os
 import logging
