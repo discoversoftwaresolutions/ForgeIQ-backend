@@ -31,3 +31,31 @@ async def trigger_build(req: BuildTriggerRequest):
 @app.get("/health")
 def health():
     return {"status": "ForgeIQ backend is healthy"}
+from registry import register_agent, list_agents, get_agent, update_heartbeat
+from fastapi import HTTPException
+
+class AgentRegistration(BaseModel):
+    name: str
+    endpoint: str
+    capabilities: list
+
+@app.post("/agent/register")
+def agent_register(agent: AgentRegistration):
+    register_agent(agent.name, agent.endpoint, agent.capabilities)
+    return {"message": f"{agent.name} registered."}
+
+@app.get("/agent/{name}")
+def agent_get(name: str):
+    agent = get_agent(name)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+@app.get("/agents")
+def agent_list():
+    return list_agents()
+
+@app.post("/agent/{name}/heartbeat")
+def agent_heartbeat(name: str):
+    update_heartbeat(name)
+    return {"message": f"Heartbeat updated for {name}"}
