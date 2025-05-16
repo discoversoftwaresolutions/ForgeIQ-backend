@@ -1,5 +1,5 @@
 # =======================================
-# 📁 agents/DependencyAgent/app/agent.py
+# 📁 agents/DependencyAgent//agent.py
 # =======================================
 import os
 import json
