@@ -21,3 +21,10 @@ services:
       - "8010:8010"
     depends_on:
       - forgeiq-backend
+  test-agent:
+    build:
+      context: ./agents/TestAgent
+    ports:
+      - "8020:8020"
+    depends_on:
+      - forgeiq-backend
