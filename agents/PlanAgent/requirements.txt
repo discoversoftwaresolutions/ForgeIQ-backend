@@ -9,3 +9,6 @@ opentelemetry-exporter-otlp-proto-http # Or grpc, or jaeger, etc.
 opentelemetry-instrumentation-fastapi # If using FastAPI
 opentelemetry-instrumentation-requests # If using requests library
 opentelemetry-instrumentation-logging
+sentence-transformers
+weaviate-client
+numpy
