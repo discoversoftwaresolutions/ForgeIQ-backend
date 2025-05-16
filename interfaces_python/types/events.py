@@ -79,3 +79,39 @@ class DagDefinitionCreatedEvent(TypedDict):
     dag: DagDefinition
     raw_llm_response: Optional[str] # For audit/debugging
     timestamp: str
+# ... (existing TypedDicts) ...
+
+class NewArtifactEvent(TypedDict):
+    event_type: str # "NewArtifactEvent"
+    event_id: str
+    project_id: str
+    commit_sha: Optional[str]
+    artifact_name: str # e.g., Docker image name, file name
+    artifact_type: str # e.g., "docker_image", "python_wheel", "terraform_plan"
+    artifact_location: str # e.g., "registry/image:tag", "s3://bucket/path", "/path/to/artifact_in_container"
+    timestamp: str
+
+class SecurityFinding(TypedDict):
+    finding_id: str # A unique ID for the finding, perhaps from the tool
+    rule_id: Optional[str] # e.g., Bandit rule ID, CVE ID
+    severity: str # 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL'
+    description: str
+    file_path: Optional[str]
+    line_number: Optional[int]
+    code_snippet: Optional[str] # Snippet of vulnerable code/config
+    remediation: Optional[str]
+    tool_name: str
+
+class SecurityScanResultEvent(TypedDict):
+    event_type: str # "SecurityScanResultEvent"
+    triggering_event_id: str # ID of the event that triggered the scan
+    project_id: str
+    commit_sha: Optional[str]
+    artifact_name: Optional[str] # If scan was on an artifact
+    scan_type: str # e.g., "SAST", "SCA_PYTHON", "IAC_TERRAFORM", "CONTAINER_IMAGE"
+    tool_name: str
+    status: str # 'SUCCESS', 'FAILED_TO_SCAN', 'COMPLETED_WITH_FINDINGS', 'COMPLETED_CLEAN'
+    findings: List[SecurityFinding]
+    summary: Optional[str] # e.g., "Found 5 high, 2 medium vulnerabilities"
+    scan_duration_seconds: Optional[float]
+    timestamp: str
