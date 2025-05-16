@@ -1,0 +1,33 @@
+# ====================================
+# 📁 agents/CodeNavAgent/Dockerfile
+# ====================================
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONPATH=/app
+
+# For sentence-transformers, sometimes build tools are needed for underlying libraries
+# For Hugging Face Hub interaction or model downloads
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the entire repository context into /app
+# This assumes requirements.txt is at the root of the repository
+COPY . /app
+
+# Install Python dependencies from the root requirements.txt
+# Ensure sentence-transformers, weaviate-client, fastapi, uvicorn are in requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# The port Uvicorn (within agent.py) will listen on inside the container.
+# Railway's $PORT environment variable will map to this.
+# The agent.py for CodeNavAgent was set up to use PORT from env or default to 8001.
+# EXPOSE 8001 # Optional: documents the port the application inside uses
+
+# Command to run the agent's main script which starts its API server
+CMD ["python", "-u", "agents/CodeNavAgent/app/agent.py"]
