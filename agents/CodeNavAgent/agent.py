@@ -1,241 +1,265 @@
 # agents/CodeNavAgent/agent.py
-import os
-import time
-import json
-from sentence_transformers import SentenceTransformer
-import logging
-from typing import List, Dict, Any, Optional
+# ... (imports from previous CodeNavAgent definition, including new ones below)
+from fastapi import FastAPI, HTTPException, Body
+from pydantic import BaseModel, Field # For request/response validation if not using TypedDict directly for API
+from typing import List, Dict, Any, Optional # Ensure this is imported
+import uvicorn
 
-from .weaviate_client import WeaviateManager # Assuming WeaviateManager is in weaviate_client.py
-from .code_parser import chunk_code_content, scan_code_directory, get_language_from_extension
-# from core.event_bus.redis_bus import EventBus # If it needs to listen/publish for indexing tasks
-# from interfaces.types import CodeNavSearchQuery, CodeNavSearchResults, CodeNavSearchResultItem # If using typed dicts for API
+# --- Observability Setup ---
+SERVICE_NAME_CODENAV = "CodeNavAgent" # Consistent service name
+LOG_LEVEL_CODENAV = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=LOG_LEVEL_CODENAV,
+    format=f'%(asctime)s - {SERVICE_NAME_CODENAV} - %(name)s - %(levelname)s - %(message)s'
+)
+tracer_codenav = None
+try:
+    from core.observability.tracing import setup_tracing
+    tracer_codenav = setup_tracing(SERVICE_NAME_CODENAV)
+except ImportError:
+    logging.getLogger(SERVICE_NAME_CODENAV).warning(
+        "CodeNavAgent: Tracing setup failed."
+    )
+logger_codenav = logging.getLogger(__name__) # Use this for logging within the class
+# --- End Observability Setup ---
 
-# Configure logging (basic setup, can be enhanced)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# ... (WeaviateManager and CodeParser class/functions as defined before) ...
+# ... (EMBEDDING_MODEL_NAME, CODE_BASE_PATH defined as before) ...
 
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", 'all-MiniLM-L6-v2')
-# Directory where code to be indexed might be mounted or checked out in the container
-CODE_BASE_PATH = os.getenv("CODE_BASE_PATH", "/codesrc") # Example path inside Docker
+# Pydantic models for API validation (alternative to using TypedDicts directly for FastAPI body)
+class ApiSearchRequest(BaseModel):
+    project_id: str
+    query_text: str
+    limit: Optional[int] = Field(default=10, ge=1, le=100)
+    filters: Optional[Dict[str, Any]] = None
+
+class ApiCodeSnippet(BaseModel): # Corresponds to CodeNavSearchResultItem
+    file_path: str
+    snippet: str
+    score: float
+    language: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    metadata: Optional[Dict[str, Any]] = None
+    raw_weaviate_id: Optional[str] = None
+
+class ApiSearchResponse(BaseModel):
+    results: List[ApiCodeSnippet]
+
+class ApiIndexRequest(BaseModel):
+    project_id: str
+    directory_path_in_container: str # Relative to CODE_BASE_PATH
 
 class CodeNavAgent:
     def __init__(self):
-        logger.info(f"Initializing CodeNavAgent with embedding model: {EMBEDDING_MODEL_NAME}")
+        logger_codenav.info(f"Initializing CodeNavAgent with embedding model: {EMBEDDING_MODEL_NAME}")
+        # ... (embedding_model and weaviate_manager initialization as before) ...
+        self.embedding_model = None # Placeholder init
         try:
             self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-            logger.info("SentenceTransformer model loaded successfully.")
+            logger_codenav.info("SentenceTransformer model loaded successfully.")
         except Exception as e:
-            logger.error(f"Failed to load SentenceTransformer model '{EMBEDDING_MODEL_NAME}': {e}", exc_info=True)
-            self.embedding_model = None # Critical failure
+            logger_codenav.error(f"Failed to load SentenceTransformer model '{EMBEDDING_MODEL_NAME}': {e}", exc_info=True)
 
         self.weaviate_manager = WeaviateManager()
-        # self.event_bus = EventBus() # Initialize if agent uses event bus
 
-        # TODO: Add API server setup (e.g., FastAPI) if this agent serves search requests over HTTP
-        # For now, search method can be called directly or via event bus triggers
+
+    @property # Make tracer accessible if needed, or pass explicitly
+    def tracer(self):
+        return tracer_codenav
+
+    # ... index_project_directory and perform_search methods as defined before ...
+    # Ensure they use logger_codenav and integrate tracing spans:
 
     def index_project_directory(self, project_id: str, directory_path: str):
+        if not self.tracer: # Fallback if tracer couldn't initialize
+            self._index_project_directory_logic(project_id, directory_path)
+            return
+
+        with self.tracer.start_as_current_span("index_project_directory") as span:
+            span.set_attributes({
+                "code_nav.project_id": project_id,
+                "code_nav.directory_path": directory_path
+            })
+            try:
+                self._index_project_directory_logic(project_id, directory_path)
+                span.set_attribute("code_nav.indexing_status", "success")
+            except Exception as e:
+                logger_codenav.error(f"Exception during index_project_directory: {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Indexing failed"))
+                span.set_attribute("code_nav.indexing_status", "failed")
+
+
+    def _index_project_directory_logic(self, project_id: str, directory_path: str):
+        # ... (actual indexing logic from previous CodeNavAgent detailed version) ...
+        # ... (scan_code_directory, chunk_code_content, encode, batch_add_snippets) ...
         if not self.embedding_model or not self.weaviate_manager.client:
-            logger.error("Cannot index directory: Agent not fully initialized (model or Weaviate missing).")
+            logger_codenav.error("Cannot index directory: Agent not fully initialized (model or Weaviate missing).")
             return
 
-        logger.info(f"Starting indexing for project '{project_id}' in directory: {directory_path}")
-
-        # In a real scenario, you'd manage a list of already indexed files/hashes
-        # to avoid re-indexing unchanged content or to handle deletions.
-        # This is a simplified "index all found files" approach.
-
-        files_to_index = scan_code_directory(directory_path)
-        if not files_to_index:
-            logger.info(f"No files found to index in {directory_path} for project {project_id}.")
-            return
-
+        logger_codenav.info(f"Starting indexing for project '{project_id}' in directory: {directory_path}")
+        files_to_index = scan_code_directory(directory_path) # from .code_parser
+        # ... rest of the logic ...
         all_chunks_data = []
         all_vectors = []
-
         for file_path in files_to_index:
-            relative_file_path = os.path.relpath(file_path, directory_path) # Store path relative to project root
+            # ... (file reading, chunking, embedding as before) ...
+            # Make sure to use logger_codenav
+            relative_file_path = os.path.relpath(file_path, directory_path)
             try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
+                if not content.strip(): continue
+                language = get_language_from_extension(file_path) # from .code_parser
+                if not language: continue
 
-                if not content.strip(): # Skip empty files
-                    logger.debug(f"Skipping empty file: {file_path}")
-                    continue
-
-                language = get_language_from_extension(file_path)
-                if not language: # Skip unknown file types for now
-                    logger.debug(f"Skipping file with unknown language/extension: {file_path}")
-                    continue
-
-                logger.debug(f"Processing file for indexing: {file_path} (lang: {language})")
-                code_chunks_info = chunk_code_content(content, language=language, file_path=relative_file_path)
-
-                if not code_chunks_info:
-                    continue
+                code_chunks_info = chunk_code_content(content, language=language, file_path=relative_file_path) # from .code_parser
+                if not code_chunks_info: continue
 
                 chunk_contents = [chunk["content"] for chunk in code_chunks_info]
-                # Generate embeddings in batch for efficiency
                 vectors = self.embedding_model.encode(chunk_contents, show_progress_bar=False).tolist()
 
                 for i, chunk_info in enumerate(code_chunks_info):
                     snippet_data = {
-                        "projectId": project_id,
-                        "filePath": relative_file_path,
-                        "content": chunk_info["content"],
-                        "language": language,
-                        "startLine": chunk_info["startLine"],
-                        "endLine": chunk_info["endLine"],
-                        "contentHash": chunk_info["contentHash"],
-                        "metadataJson": chunk_info["metadataJson"]
+                        "projectId": project_id, "filePath": relative_file_path, "content": chunk_info["content"],
+                        "language": language, "startLine": chunk_info["startLine"], "endLine": chunk_info["endLine"],
+                        "contentHash": chunk_info["contentHash"], "metadataJson": chunk_info["metadataJson"]
                     }
                     all_chunks_data.append(snippet_data)
                     all_vectors.append(vectors[i])
-
             except Exception as e:
-                logger.error(f"Error processing file {file_path} for indexing: {e}", exc_info=True)
+                logger_codenav.error(f"Error processing file {file_path} for indexing: {e}", exc_info=True)
 
         if all_chunks_data and all_vectors:
-            logger.info(f"Attempting to batch add {len(all_chunks_data)} snippets for project {project_id}.")
             self.weaviate_manager.batch_add_snippets(all_chunks_data, all_vectors)
-        else:
-            logger.info(f"No valid chunks generated for project {project_id} in {directory_path}.")
-
-        logger.info(f"Finished indexing attempt for project '{project_id}' in directory: {directory_path}")
+        logger_codenav.info(f"Finished indexing attempt for project '{project_id}' in {directory_path}")
 
 
-    def perform_search(self, project_id: str, query_text: str, limit: int = 10, search_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]: # Return type should match CodeNavSearchResultItem structure
-        if not self.embedding_model or not self.weaviate_manager.client:
-            logger.error("Cannot search: Agent not fully initialized (model or Weaviate missing).")
-            return []
+    def perform_search(self, project_id: str, query_text: str, limit: int = 10, search_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        if not self.tracer: # Fallback
+            return self._perform_search_logic(project_id, query_text, limit, search_filters)
 
-        logger.info(f"Performing search in project '{project_id}' for query: '{query_text}' with limit {limit}")
-        query_vector = self.embedding_model.encode(query_text).tolist()
-
-        # Example: search_filters = {"language": "python"}
-        search_results_raw = self.weaviate_manager.semantic_search(query_vector, project_id=project_id, limit=limit, filters=search_filters)
-
-        # Transform raw Weaviate results into a more structured format if needed
-        # This structure should align with interfaces_python.types.CodeNavSearchResultItem
-        results = []
-        for raw_item in search_results_raw:
-            metadata_json = raw_item.get("metadataJson", "{}")
+        with self.tracer.start_as_current_span("perform_search") as span:
+            span.set_attributes({
+                "code_nav.project_id": project_id,
+                "code_nav.query_text": query_text, # Be careful with PII in query_text if sensitive
+                "code_nav.limit": limit,
+                "code_nav.has_filters": bool(search_filters)
+            })
             try:
-                metadata = json.loads(metadata_json)
-            except json.JSONDecodeError:
-                metadata = {}
+                results = self._perform_search_logic(project_id, query_text, limit, search_filters)
+                span.set_attribute("code_nav.num_results", len(results))
+                return results
+            except Exception as e:
+                logger_codenav.error(f"Exception during perform_search: {e}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Search failed"))
+                return []
 
-            results.append({
-                "file_path": raw_item.get("filePath"),
-                "snippet": raw_item.get("content"), # You might want to truncate or summarize this
-                "score": raw_item.get("_additional", {}).get("certainty", 0.0), # Or use 'distance'
-                "language": raw_item.get("language"),
-                "start_line": raw_item.get("startLine"),
-                "end_line": raw_item.get("endLine"),
-                "metadata": metadata, # Parsed metadata
-                "raw_weaviate_id": raw_item.get("_additional", {}).get("id") # Weaviate's internal ID
+    def _perform_search_logic(self, project_id: str, query_text: str, limit: int = 10, search_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        # ... (actual search logic from previous CodeNavAgent detailed version) ...
+        # ... (encode query, call weaviate_manager.semantic_search, format results) ...
+        if not self.embedding_model or not self.weaviate_manager.client:
+            logger_codenav.error("Cannot search: Agent not fully initialized.")
+            return []
+        logger_codenav.info(f"Performing search in project '{project_id}' for query: '{query_text}' with limit {limit}")
+        query_vector = self.embedding_model.encode(query_text).tolist()
+        search_results_raw = self.weaviate_manager.semantic_search(query_vector, project_id=project_id, limit=limit, filters=search_filters)
+        results = [] # Format into ApiCodeSnippet compatible dicts
+        for raw_item in search_results_raw:
+            # ... (formatting logic as before) ...
+             metadata_json = raw_item.get("metadataJson", "{}")
+             try: metadata = json.loads(metadata_json)
+             except json.JSONDecodeError: metadata = {}
+             results.append({
+                "file_path": raw_item.get("filePath"), "snippet": raw_item.get("content"),
+                "score": raw_item.get("_additional", {}).get("certainty", 0.0),
+                "language": raw_item.get("language"), "start_line": raw_item.get("startLine"),
+                "end_line": raw_item.get("endLine"), "metadata": metadata,
+                "raw_weaviate_id": raw_item.get("_additional", {}).get("id")
             })
         return results
 
-    def run_api_server(self, host="0.0.0.0", port=8001):
-        """ Exposes search functionality via a simple FastAPI server """
-        from fastapi import FastAPI, HTTPException
-        # from interfaces_python.types import CodeNavSearchQuery # If using TypedDict for request body
 
-        # Ensure this import works with your PYTHONPATH settings in Docker
-        # It might need to be relative if this agent.py is the entrypoint for uvicorn
+    def create_api_app(self):
+        api_app = FastAPI(title=f"{SERVICE_NAME_CODENAV} API")
+        logger_codenav.info(f"FastAPI app created for {SERVICE_NAME_CODENAV}")
 
-        # Define a Pydantic model for the search request if not using TypedDict directly
-        from pydantic import BaseModel, Field
-        class SearchRequest(BaseModel):
-            project_id: str
-            query_text: str
-            limit: Optional[int] = 10
-            filters: Optional[Dict[str, Any]] = None
+        # Instrument FastAPI app if OTel is setup
+        # from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        # if tracer_codenav: # Check if tracing was initialized
+        #     FastAPIInstrumentor.instrument_app(api_app, tracer_provider=tracer_codenav.provider) # Pass provider
+        #     logger_codenav.info("FastAPI app instrumented with OpenTelemetry.")
 
 
-        api_app = FastAPI(title="CodeNavAgent API")
-
-        @api_app.post("/search", summary="Perform semantic code search")
-        # async def search_endpoint(request_data: CodeNavSearchQuery): # Using TypedDict
-        async def search_endpoint(request_data: SearchRequest): # Using Pydantic model
-            logger.info(f"API /search called with project: {request_data.project_id}, query: '{request_data.query_text}'")
-            if not self.embedding_model or not self.weaviate_manager.client:
-                raise HTTPException(status_code=503, detail="CodeNavAgent not fully initialized.")
+        @api_app.post("/search", response_model=ApiSearchResponse, summary="Perform semantic code search")
+        async def search_endpoint(request_data: ApiSearchRequest):
+            logger_codenav.info(f"API /search called with project: {request_data.project_id}, query: '{request_data.query_text}'")
+            if not self.embedding_model or not self.weaviate_manager.client: # Check again in request context
+                raise HTTPException(status_code=503, detail=f"{SERVICE_NAME_CODENAV} not fully initialized.")
             try:
-                results = self.perform_search(
+                # Use the agent's perform_search method
+                results = self.perform_search( # This method already includes tracing
                     project_id=request_data.project_id,
                     query_text=request_data.query_text,
-                    limit=request_data.limit or 10,
+                    limit=request_data.limit,
                     search_filters=request_data.filters
                 )
-                return {"results": results}
+                return ApiSearchResponse(results=[ApiCodeSnippet(**res) for res in results])
             except Exception as e:
-                logger.error(f"Error in /search endpoint: {e}", exc_info=True)
+                logger_codenav.error(f"Error in /search endpoint: {e}", exc_info=True)
+                # trace.get_current_span().record_exception(e) # Record exception on current span
+                # trace.get_current_span().set_status(trace.Status(trace.StatusCode.ERROR, "Search endpoint error"))
                 raise HTTPException(status_code=500, detail="Internal server error during search.")
 
-        @api_app.post("/index_directory", summary="Trigger indexing of a project directory (conceptual)")
-        async def index_endpoint(project_id: str, directory_path_in_container: str):
-            # In a real system, this might be an async task, or triggered via event bus
-            # For now, direct call (might be long-running)
-            logger.info(f"API /index_directory called for project: {project_id}, path: {directory_path_in_container}")
+        @api_app.post("/index_project", summary="Trigger indexing of a project directory")
+        async def index_project_endpoint(request_data: ApiIndexRequest):
+            logger_codenav.info(f"API /index_project called for project: {request_data.project_id}, path: {request_data.directory_path_in_container}")
+
             # This path needs to be accessible within the CodeNavAgent's container
-            # e.g., a path under CODE_BASE_PATH if code is mounted/copied there
-            full_path_to_index = os.path.join(CODE_BASE_PATH, project_id, directory_path_in_container) # Example construction
-            if not os.path.isdir(full_path_to_index):
-                 raise HTTPException(status_code=404, detail=f"Directory not found in container: {full_path_to_index}")
+            # Typically, you'd have a base path (e.g., from CODE_BASE_PATH env var)
+            # and project_id might map to a subfolder within that base path.
+            # For this example, assume directory_path_in_container is relative to some known root.
+            # It's better to make directory_path_in_container an absolute path within the container
+            # or a path relative to a configured CODE_BASE_PATH.
 
-            # Offload actual indexing to a background task in a real app
-            self.index_project_directory(project_id, full_path_to_index)
-            return {"message": f"Indexing started for project {project_id}, directory {directory_path_in_container}"}
+            # Sanitize/validate path?
+            # path_to_index = os.path.join(CODE_BASE_PATH, request_data.project_id, request_data.directory_path_in_container) # Example
+            path_to_index = request_data.directory_path_in_container # If it's already an absolute path in container
 
-        import uvicorn
-        logger.info(f"Starting CodeNavAgent API server on {host}:{port}")
-        uvicorn.run(api_app, host=host, port=port, log_level=LOG_LEVEL.lower())
+            if not os.path.isdir(path_to_index): # Check if path exists
+                 logger_codenav.error(f"Directory not found for indexing: {path_to_index}")
+                 raise HTTPException(status_code=404, detail=f"Directory not found in container: {path_to_index}")
+
+            # In a production system, indexing should be an async background task.
+            # FastAPI's BackgroundTasks is one way, or a proper task queue like Celery.
+            # For now, direct call (will block the API response until done).
+            try:
+                self.index_project_directory(request_data.project_id, path_to_index)
+                return {"message": f"Indexing started/completed for project {request_data.project_id}, directory {path_to_index}"}
+            except Exception as e:
+                logger_codenav.error(f"Error triggering indexing via API: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Error during indexing process.")
+
+        return api_app
 
     def run_worker(self):
-        """
-        Runs the agent in a worker mode, perhaps listening to an event bus for indexing tasks.
-        """
-        logger.info("CodeNavAgent started in worker mode.")
-        logger.info(f"Code base path configured for scanning (if any): {CODE_BASE_PATH}")
-
-        # Example: Perform an initial scan of a pre-configured directory if CODE_BASE_PATH is set
-        # This would be more complex, iterating through projects defined under CODE_BASE_PATH
+        logger_codenav.info(f"{SERVICE_NAME_CODENAV} worker starting up...")
+        # ... (initial indexing scan from CODE_BASE_PATH as defined before) ...
         if CODE_BASE_PATH and os.path.isdir(CODE_BASE_PATH):
-            # Assuming CODE_BASE_PATH contains subdirectories, each being a project_id
             for project_id_dir in os.listdir(CODE_BASE_PATH):
                 project_full_path = os.path.join(CODE_BASE_PATH, project_id_dir)
                 if os.path.isdir(project_full_path):
-                    logger.info(f"Found project directory to index: {project_full_path} (ID: {project_id_dir})")
-                    # In a real scenario, you might trigger this via an event or initial setup
+                    logger_codenav.info(f"Initial scan: Indexing project directory: {project_full_path} (ID: {project_id_dir})")
                     self.index_project_directory(project_id=project_id_dir, directory_path=project_full_path)
         else:
-            logger.warning(f"CODE_BASE_PATH ('{CODE_BASE_PATH}') is not set or not a directory. No initial indexing scan performed.")
+            logger_codenav.warning(f"CODE_BASE_PATH ('{CODE_BASE_PATH}') not set or not a directory. No initial indexing scan.")
 
-
-        # If this agent also needs to listen to events (e.g., "NewCommitEvent" to trigger re-indexing)
-        # it would set up its event bus subscriber here.
-        # For now, we can make it expose the API server.
-        # If it needs to do both, it would run the API server in a separate thread/process
-        # or integrate event listening into the API app's lifecycle (e.g. FastAPI background tasks).
-
-        # For now, let's assume it primarily serves API requests after an initial scan
-        # If it's meant to be an API server, call run_api_server.
-        # If it's meant to be a continuously running worker that polls or listens to events,
-        # that logic would go here.
-        # For this example, we'll start the API server.
-        # If you need both API and background tasks (like periodic re-indexing),
-        # you'd typically use something like Celery with FastAPI, or FastAPI's BackgroundTasks.
-
+        # Start the FastAPI server
+        api_app = self.create_api_app()
         api_port = int(os.getenv("PORT", "8001")) # PORT for Railway
-        self.run_api_server(port=api_port)
-
+        uvicorn.run(api_app, host="0.0.0.0", port=api_port, log_config=None) # log_config=None to let our logging setup take over
 
 if __name__ == "__main__":
-    # This determines how the agent runs when `python agents/CodeNavAgent/app/agent.py` is called
     agent = CodeNavAgent()
-    # Default to worker mode which might include starting an API server
     agent.run_worker()
