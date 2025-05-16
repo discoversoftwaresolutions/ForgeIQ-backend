@@ -1,5 +1,14 @@
-
 # interfaces/types/__init__.py
+from .events import ( /* existing event imports */ )
+from .cache import ( /* existing cache imports */ )
+from .agent import ( # <<< NEW
+    AgentCapability, AgentEndpoint, AgentRegistrationInfo
+)
+
+__all__ = [
+    # ... (existing exports from events.py and cache.py) ...
+    "AgentCapability", "AgentEndpoint", "AgentRegistrationInfo", # <<< NEW
+]# interfaces/types/__init__.py
 from .events import (
     TestResult, TestFailedEvent,
     CodeNavSearchQuery, CodeNavSearchResultItem, CodeNavSearchResults,
