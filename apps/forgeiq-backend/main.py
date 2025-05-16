@@ -1,26 +1,33 @@
-# ==========================
+# Rebuild forgeiq-backend main.py with full logic including task execution and agent orchestration
+from pathlib import Path
+
+main_py_path = Path("/mnt/data/forgeiq/apps/forgeiq-backend/main.py")
+
+full_main_py = """# ==========================
 # 📁 apps/forgeiq-backend/main.py
 # ==========================
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, List
+from datetime import datetime
 import requests
 
-# === FastAPI App Configuration ===
+# === FastAPI App ===
 app = FastAPI(
     title="ForgeIQ Backend",
     description="Autonomous Agent Build System Orchestrator",
     version="0.1.0"
 )
 
-# === In-Memory Agent Registry ===
-AGENT_REGISTRY = {}
+# === Agent Registry (in-memory) ===
+AGENT_REGISTRY: Dict[str, Dict] = {}
 
-def register_agent(name: str, endpoint: str, capabilities: list):
+def register_agent(name: str, endpoint: str, capabilities: List[str]):
     AGENT_REGISTRY[name] = {
         "endpoint": endpoint,
-        "capabilities": capabilities
+        "capabilities": capabilities,
+        "last_seen": datetime.utcnow().isoformat()
     }
 
 def get_agent(name: str):
@@ -33,7 +40,7 @@ def update_heartbeat(name: str):
     if name in AGENT_REGISTRY:
         AGENT_REGISTRY[name]["last_seen"] = datetime.utcnow().isoformat()
 
-# === Pydantic Models ===
+# === Request Models ===
 class ErrorLogRequest(BaseModel):
     error_log: str
 
@@ -44,9 +51,13 @@ class BuildTriggerRequest(BaseModel):
 class AgentRegistration(BaseModel):
     name: str
     endpoint: str
-    capabilities: list
+    capabilities: List[str]
 
-# === API Endpoints ===
+class TaskExecutionRequest(BaseModel):
+    project: str
+    tasks: List[str]
+
+# === API Routes ===
 
 @app.get("/health")
 def health():
@@ -54,14 +65,12 @@ def health():
 
 @app.post("/diagnose")
 async def diagnose(request: ErrorLogRequest):
-    # TODO: Route to DebugIQ in future
     if "ReferenceError" in request.error_log:
         return {"diagnosis": "Undefined variable", "confidence": 0.92}
     return {"diagnosis": "Generic error", "confidence": 0.65}
 
 @app.post("/trigger-build")
 async def trigger_build(req: BuildTriggerRequest):
-    # === PlanAgent Coordination ===
     plan_agent = get_agent("PlanAgent")
     if not plan_agent:
         raise HTTPException(status_code=404, detail="PlanAgent not registered")
@@ -81,6 +90,34 @@ async def trigger_build(req: BuildTriggerRequest):
     except Exception as e:
         return {"error": f"Failed to reach PlanAgent: {str(e)}"}
 
+@app.post("/execute-tasks")
+async def execute_tasks(req: TaskExecutionRequest):
+    results = []
+    for task in req.tasks:
+        agent_name = f"{task.lower()}-agent".replace("_", "-")
+        agent = get_agent(agent_name.capitalize())
+        if not agent:
+            results.append({
+                "task": task,
+                "status": "skipped",
+                "reason": f"{agent_name} not registered"
+            })
+            continue
+        try:
+            exec_resp = requests.post(f"{agent['endpoint']}/execute", json={"project": req.project, "task": task})
+            results.append({
+                "task": task,
+                "status": "completed",
+                "result": exec_resp.json()
+            })
+        except Exception as e:
+            results.append({
+                "task": task,
+                "status": "failed",
+                "reason": str(e)
+            })
+    return {"project": req.project, "results": results}
+
 @app.post("/agent/register")
 def agent_register(agent: AgentRegistration):
     register_agent(agent.name, agent.endpoint, agent.capabilities)
@@ -96,3 +133,13 @@ def agent_get(name: str):
 @app.get("/agents")
 def agent_list():
     return list_agents()
+
+@app.post("/agent/{name}/heartbeat")
+def agent_heartbeat(name: str):
+    update_heartbeat(name)
+    return {"message": f"Heartbeat updated for {name}"}
+"""
+
+main_py_path.write_text(full_main_py)
+
+"ForgeIQ backend main.py file rewritten with complete agent orchestration logic and task execution endpoint."
