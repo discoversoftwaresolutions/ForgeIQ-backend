@@ -115,3 +115,46 @@ class SecurityScanResultEvent(TypedDict):
     summary: Optional[str] # e.g., "Found 5 high, 2 medium vulnerabilities"
     scan_duration_seconds: Optional[float]
     timestamp: str
+# ... (existing TypedDicts) ...
+
+class AuditLogEntry(TypedDict):
+    event_type: str     # "AuditEvent"
+    audit_id: str       # Unique ID for this audit log
+    timestamp: str      # ISO datetime of when the audit log was created
+    source_event_type: str # The type of event being audited
+    source_event_id: Optional[str] # ID of the original event, if available
+    service_name: Optional[str]    # Service/agent that emitted the original event
+    project_id: Optional[str]
+    commit_sha: Optional[str]
+    user_or_actor: Optional[str]   # User or system component responsible
+    action_taken: str              # Description of the action or event content
+    details: Dict[str, Any]        # Key details from the original event payload
+    policy_check_results: Optional[Dict[str, str]] # For future policy checks
+
+class SLAMetric(TypedDict):
+    metric_name: str    # e.g., "dag_execution_time", "task_failure_rate"
+    value: float
+    unit: str           # e.g., "seconds", "percentage"
+    project_id: Optional[str]
+    dag_id: Optional[str]
+    task_id: Optional[str]
+
+class SLAViolationEvent(TypedDict):
+    event_type: str      # "SLAViolationEvent"
+    alert_id: str
+    timestamp: str
+    sla_name: str
+    metric_name: str
+    observed_value: float
+    threshold_value: float
+    project_id: Optional[str]
+    details: str
+
+class GovernanceAlertEvent(TypedDict): # More generic than SLA violation
+    event_type: str      # "GovernanceAlertEvent"
+    alert_id: str
+    timestamp: str
+    alert_type: str      # e.g., "EthicalBoundaryCrossed", "PolicyViolation", "DataHandlingIssue"
+    severity: str        # 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'
+    description: str
+    context: Dict[str, Any] # Relevant data from the event that triggered the alert
