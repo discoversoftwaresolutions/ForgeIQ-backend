@@ -1,0 +1,11 @@
+├── CodeNavAgent/         # Vector-based semantic navigation
+├── BuildSurfAgent/       # LLM-to-pipeline generation (prompt → DAG)
+├── PlanAgent/            # Already wired — DAG builder
+├── TestAgent/            # Already wired — test runner
+├── PatchAgent/           # Embedding-driven patch suggestions
+├── DependencyAgent/      # Change graph propagation tracker
+├── CacheAgent/           # Already wired — build fingerprint/cache
+├── CI_CD_Agent/          # CI/CD deploy orchestrator (GitHub/Amplify)
+├── ReportingAgent/       # Pushes telemetry and logs
+├── SecurityAgent/        # Code & pipeline security analyzer
+└── GovernanceAgent/      # Ethics, traceability, SLA logging
