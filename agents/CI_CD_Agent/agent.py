@@ -1,6 +1,6 @@
 ```python
 # ======================================
-# 📁 agents/CI_CD_Agent/app/agent.py
+# 📁 agents/CI_CD_Agent/agent.py
 # ======================================
 import os
 import json
