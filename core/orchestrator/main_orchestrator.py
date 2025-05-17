@@ -429,3 +429,80 @@ async def request_mcp_strategy_optimization(self,
         logger.error(f"Orchestrator: Error requesting MCP strategy for '{project_id}': {e}", exc_info=True)
         if _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
         return None
+# In Orchestrator class (core/orchestrator/main_orchestrator.py)
+# ... (ensure SDKMCPStrategyRequestContext, SDKMCPStrategyResponse are imported from sdk.models)
+from sdk.models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse # Add these
+
+# ... (within __init__ or wherever sdk client is available)
+# self.forgeiq_sdk_client: Optional[ForgeIQClient] = forgeiq_sdk_client (from constructor)
+
+async def request_and_apply_mcp_optimization(
+    self, 
+    project_id: str, 
+    current_dag: DagDefinition, # The current DAG to be optimized
+    flow_id: str # Parent flow ID for tracing and state
+    ) -> Optional[DagDefinition]: # Returns a new DAG if optimization occurred
+    """
+    Requests MCP to optimize a DAG and returns the new DAG if successful.
+    """
+    if not self.forgeiq_sdk_client:
+        logger.error(f"Flow {flow_id}: SDK client not available for MCP optimization request for project '{project_id}'.")
+        return None
+
+    span_attrs = {"project_id": project_id, "flow_id": flow_id, "mcp_task": "optimize_dag"}
+    span = self._start_trace_span_if_available("request_mcp_optimization", **span_attrs)
+    logger.info(f"Flow {flow_id}: Orchestrator requesting MCP build strategy optimization for project '{project_id}'.")
+
+    await self._update_flow_state(flow_id, {"current_stage": f"REQUESTING_MCP_OPTIMIZATION_FOR_DAG_{current_dag['dag_id']}"})
+
+    try:
+        with span: #type: ignore
+            # Prepare context for the SDK call, which then goes to ForgeIQ-backend, then to private MCP
+            # The SDKMCPStrategyRequestContext requires project_id, dag_representation, telemetry_data
+            mcp_request_context = SDKMCPStrategyRequestContext(
+                project_id=project_id,
+                # Convert current_dag (TypedDict) to a list of dicts for dag_representation
+                current_dag_snapshot=[dict(node) for node in current_dag.get("nodes", [])], 
+                optimization_goal="general_build_efficiency", # Example goal
+                additional_mcp_context={"triggering_flow_id": flow_id}
+            )
+
+            mcp_response: SDKMCPStrategyResponse = await self.forgeiq_sdk_client.request_mcp_build_strategy(
+                context=mcp_request_context # type: ignore
+            )
+
+            if mcp_response and mcp_response.get("status") == "strategy_provided" and mcp_response.get("strategy_details"): # Example success status from MCP
+                strategy_details = mcp_response["strategy_details"]
+                new_dag_raw = strategy_details.get("new_dag_definition_raw") # This is Dict[str,Any] from API model
+
+                if new_dag_raw and isinstance(new_dag_raw, dict):
+                    # Validate/cast new_dag_raw to DagDefinition TypedDict
+                    # For simplicity, direct cast. Pydantic would be safer for validation.
+                    validated_new_dag = DagDefinition(**new_dag_raw) # type: ignore
+                    logger.info(f"Flow {flow_id}: MCP provided optimized DAG '{validated_new_dag.get('dag_id')}' for project '{project_id}'.")
+                    if _trace_api and span: 
+                        span.set_attribute("mcp.strategy_id", strategy_details.get("strategy_id"))
+                        span.set_attribute("mcp.new_dag_id", validated_new_dag.get("dag_id"))
+                        span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                    await self._update_flow_state(flow_id, {"current_stage": f"MCP_OPTIMIZATION_RECEIVED_DAG_{validated_new_dag.get('dag_id')}"})
+                    return validated_new_dag
+                else:
+                    logger.info(f"Flow {flow_id}: MCP provided strategy but no new DAG definition for project '{project_id}'. Directives: {strategy_details.get('directives')}")
+                    if _trace_api and span: span.set_attribute("mcp.directives_only", True)
+                    # If only directives, the Orchestrator would need to interpret and act on them.
+            else:
+                msg = f"MCP strategy optimization failed or no strategy provided for project '{project_id}'. Response: {mcp_response}"
+                logger.warning(f"Flow {flow_id}: {msg}")
+                if _trace_api and span: span.set_attribute("mcp.error", msg)
+
+            await self._update_flow_state(flow_id, {"current_stage": f"MCP_OPTIMIZATION_NO_NEW_DAG"})
+    except Exception as e:
+        logger.error(f"Flow {flow_id}: Error requesting/processing MCP strategy for project '{project_id}': {e}", exc_info=True)
+        await self._update_flow_state(flow_id, {"current_stage": "MCP_OPTIMIZATION_ERROR", "error_message": str(e)})
+        if _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
+    return None
+
+# You would then call this `request_mcp_strategy_optimization` method from within
+# a larger flow like `run_full_build_flow` at an appropriate point, e.g., after
+# `DependencyAgent` determines affected tasks but before `PlanAgent` executes a DAG.
+# If an optimized DAG is returned, the Orchestrator would then pass *that* DAG to PlanAgent.
