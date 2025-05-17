@@ -40,3 +40,9 @@ from .codenav_sdk import CodeNavSDKClient
 # from .agent_client import GenericAgentClient (if we define it)
 
 __all__ = ["DebugIQClient", "CodeNavSDKClient"]
+from .models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse # <<< ADD THESE
+
+__all__ = [
+    # ... (existing exports) ...
+    "SDKMCPStrategyRequestContext", "SDKMCPStrategyResponse", # <<< ADD THESE
+]
