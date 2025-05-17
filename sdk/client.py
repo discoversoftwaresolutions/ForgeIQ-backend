@@ -160,3 +160,26 @@ class ForgeIQClient:
         response_data = await self._request("GET", endpoint)
         return SDKDeploymentStatus(**response_data)
     ```
+# In sdk/client.py, within ForgeIQClient class:
+# Ensure SDKAlgorithmContext and SDKOptimizedAlgorithmResponse are imported from .models
+
+async def request_build_strategy_optimization(
+    self,
+    context: SDKAlgorithmContext # Use the TypedDict/Pydantic model
+) -> SDKOptimizedAlgorithmResponse:
+    """
+    Requests optimization of a build strategy for a project via ForgeIQ-backend,
+    which in turn calls the private AlgorithmAgent.
+    """
+    endpoint = f"/api/forgeiq/projects/{context['project_id']}/build-strategy/optimize" # NEW API Endpoint
+    logger.info(f"SDK: Requesting build strategy optimization for project '{context['project_id']}'")
+
+    # The payload for the backend should match what its Pydantic model expects.
+    # It might just pass through the context or parts of it.
+    payload = {
+        "dag_representation": context["dag_representation"],
+        "telemetry_data": context["telemetry_data"]
+    }
+    response_data = await self._request("POST", endpoint, json_data=payload)
+    # Assume response_data matches SDKOptimizedAlgorithmResponse
+    return SDKOptimizedAlgorithmResponse(**response_data) # type: ignore
