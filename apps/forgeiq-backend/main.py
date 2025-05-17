@@ -260,3 +260,58 @@ async def get_project_config_api_endpoint(project_id: str): # No specific servic
         raise HTTPException(status_code=404, detail=f"Build config not found for project '{project_id}'")
 
 # Uvicorn startup is handled by the Dockerfile's CMD instruction.
+# In apps/forgeiq-backend/app/main.py
+# Add Pydantic models for request/response in api_models.py
+class MCPStrategyRequest(BaseModel):
+    current_dag_info: Optional[Dict[str, Any]] = None
+
+class MCPStrategyResponse(BaseModel):
+    project_id: str
+    strategy_id: Optional[str] = None
+    # new_dag_definition: Optional[SDKDagDefinitionModel] = None # If MCP returns a full new DAG
+    directives: Optional[List[str]] = None
+    status: str
+    message: Optional[str] = None
+
+@app.post("/api/forgeiq/mcp/optimize-strategy/{project_id}", 
+          response_model=MCPStrategyResponse, 
+          tags=["MCP Integration"],
+          dependencies=[Security(get_api_key)])
+async def mcp_optimize_strategy_endpoint(
+    project_id: str, 
+    request_data: MCPStrategyRequest,
+    private_intel_client: httpx.AsyncClient = Depends(get_private_intel_client) # Use the existing client for private stack
+):
+    with _start_api_span("mcp_optimize_strategy", project_id=project_id) as span:
+        logger.info(f"API: Forwarding optimize strategy request for '{project_id}' to private MCP.")
+
+        # Payload for your private MCP's API endpoint (e.g., /mcp/strategize)
+        # This depends on what your private MCP's API (via intelligence_bridge.py) expects
+        mcp_payload = {
+            "project_id": project_id,
+            "current_dag_info": request_data.current_dag_info,
+            "goal": "optimize_build_strategy"
+        }
+        # Example: private_mcp_endpoint = "/mcp/strategize"
+        private_mcp_endpoint = "/mcp/optimize_build_strategy" # Or whatever your private MCP exposes
+
+        try:
+            response = await private_intel_client.post(private_mcp_endpoint, json=mcp_payload)
+            response.raise_for_status()
+            mcp_response_data = response.json()
+            logger.info(f"Response from private MCP for '{project_id}': {message_summary(mcp_response_data)}")
+
+            # Adapt mcp_response_data to MCPStrategyResponse
+            return MCPStrategyResponse(
+                project_id=project_id,
+                strategy_id=mcp_response_data.get("strategy_id"),
+                # new_dag_definition=mcp_response_data.get("new_dag"),
+                directives=mcp_response_data.get("directives"),
+                status=mcp_response_data.get("status", "unknown_mcp_status"),
+                message=mcp_response_data.get("message")
+            )
+        # ... (Robust error handling for httpx call as in other endpoints) ...
+        except httpx.HTTPStatusError as e_http: # ... (handle error) ...
+            raise HTTPException(status_code=502, detail=f"MCP service error: {e_http.response.status_code}")
+        except Exception as e_call: # ... (handle error) ...
+            raise HTTPException(status_code=500, detail=f"Internal error calling MCP: {str(e_call)}")
