@@ -199,3 +199,72 @@ async def generate_algorithm_via_private_intel_endpoint(request_data: CodeGenera
         raise HTTPException(status_code=500, detail="Internal server error in code generation endpoint.")
 
 # ... (Other existing API endpoints and Uvicorn startup via Dockerfile CMD)
+# In apps/forgeiq-backend/app/main.py
+# ... (other imports, including httpx, PRIVATE_INTEL_API_BASE_URL, private_intel_http_client) ...
+from .api_models import OptimizeStrategyRequest, OptimizeStrategyResponse, OptimizedAlgorithmDetails
+# from core.build_graph import get_project_dag # Might be needed if dag_representation needs to be fetched
+
+@app.post("/api/forgeiq/projects/{project_id}/build-strategy/optimize",
+          response_model=OptimizeStrategyResponse,
+          tags=["Build Strategy Optimization"],
+          summary="Request optimization of a build strategy using private AlgorithmAgent.")
+async def optimize_build_strategy_endpoint(project_id: str, request_data: OptimizeStrategyRequest):
+    span_attrs = {"project_id": project_id}
+    with _start_api_span("optimize_build_strategy", **span_attrs) as span: # type: ignore
+        logger.info(f"API: Optimizing build strategy for project '{project_id}'.")
+
+        if not private_intel_http_client:
+            logger.error("Private Intelligence API client (for AlgorithmAgent) not initialized.")
+            if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "AlgorithmAgent client missing"))
+            raise HTTPException(status_code=503, detail="Algorithm optimization service not available.")
+
+        # Construct the AlgorithmContext payload for your private AlgorithmAgent
+        # The 'dag' your AlgorithmAgent expects might be the List[str] from get_project_dag,
+        # or the more structured DagDefinition. For now, using what request_data provides.
+        algorithm_agent_payload = {
+            "project": project_id,
+            "dag": request_data.dag_representation, # This must match what your private AlgoAgent's /generate expects for 'dag'
+            "telemetry": request_data.telemetry_data
+        }
+
+        private_api_endpoint = "/generate" # The endpoint on your private AlgorithmAgent
+
+        try:
+            logger.debug(f"Calling private AlgorithmAgent at {private_api_endpoint} for project '{project_id}'.")
+            if _tracer and span: span.set_attribute("private_intel.target_endpoint", private_api_endpoint)
+
+            # Use the existing private_intel_http_client
+            response = await private_intel_http_client.post(private_api_endpoint, json=algorithm_agent_payload)
+            response.raise_for_status()
+
+            private_api_response_data = response.json() # Expects {"reference": ref, "score": evaluated, "code": generated_code}
+            logger.info(f"Private AlgorithmAgent response: {message_summary(private_api_response_data)}")
+
+            if "code" in private_api_response_data:
+                optim_details = OptimizedAlgorithmDetails(
+                    algorithm_reference=private_api_response_data.get("reference", "N/A"),
+                    benchmark_score=private_api_response_data.get("score", 0.0),
+                    generated_code_or_dag=private_api_response_data["code"]
+                )
+                if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                return OptimizeStrategyResponse(
+                    message="Build strategy optimization processed successfully.",
+                    optimization_details=optim_details,
+                    status="completed"
+                )
+            else:
+                err_msg = "Private AlgorithmAgent returned no 'code' in response."
+                logger.error(err_msg)
+                if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, err_msg))
+                raise HTTPException(status_code=500, detail=err_msg)
+
+        except httpx.HTTPStatusError as e_http:
+            err_msg = f"Error calling AlgorithmAgent: {e_http.response.status_code} - {e_http.response.text[:200]}"
+            logger.error(err_msg, exc_info=True)
+            if _trace_api and span: span.record_exception(e_http); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "AlgoAgent HTTP error"))
+            raise HTTPException(status_code=502, detail=f"Error with AlgorithmAgent service: HTTP {e_http.response.status_code}")
+        except Exception as e_call:
+            err_msg = f"Error during AlgorithmAgent call: {e_call}"
+            logger.error(err_msg, exc_info=True)
+            if _trace_api and span: span.record_exception(e_call); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "AlgoAgent call failed"))
+            raise HTTPException(status_code=502, detail=f"Error calling AlgorithmAgent service: {str(e_call)}")
