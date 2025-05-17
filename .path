@@ -1,0 +1,2 @@
+export PYTHONPATH=$(pwd):$PYTHONPATH 
+python -m apps.agent_cli.app.main --help
