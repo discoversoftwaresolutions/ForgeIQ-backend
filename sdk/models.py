@@ -51,3 +51,16 @@ class SDKDeploymentStatus(TypedDict):
     logs_url: Optional[str]
     started_at: Optional[str]
     completed_at: Optional[str]
+# In sdk/models.py (and corresponding Pydantic model in apps/forgeiq-backend/app/api_models.py)
+
+class SDKAlgorithmContext(TypedDict): # Or Pydantic BaseModel if SDK uses Pydantic
+    project_id: str # Matches existing naming conventions
+    dag_representation: List[Any] # Could be list of task names, or more structured if needed
+    telemetry_data: Dict[str, Any]
+    # Could add user_prompt_for_optimization: Optional[str] if needed
+
+class SDKOptimizedAlgorithmResponse(TypedDict): # Or Pydantic
+    algorithm_reference: str
+    benchmark_score: float
+    generated_code_or_dag: str # Or a more structured DAG type
+    message: Optional[str]
