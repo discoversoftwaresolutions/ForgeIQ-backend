@@ -8,7 +8,7 @@ uvicorn[standard]==0.29.0 # For running FastAPI & Streamlit (if using Uvicorn fo
 pydantic==2.6.4
 streamlit # For ForgeIQ-ui (Streamlit version) & DebugIQ-frontend
 boto3>=1.28.0 # AWS SDK for Python, for S3 interaction
-prometheus_client>=0.17.0# --- Data & Machine Learning ---
+prometheus_client>=0.17.0  # --- Data & Machine Learning ---
 sentence-transformers>=2.7.0,<3.0.0 # For CodeNavAgent embeddings
 weaviate-client>=3.26.0,<4.0.0 # Weaviate Python client v3.x (aligns with weaviate.Client syntax)
 numpy>=1.26.0,<2.0.0 # Often a dependency for ML/data libraries
@@ -45,4 +45,4 @@ pytest>=7.0.0,<8.0.0
 
 # For example, if BuildSurfAgent uses the OpenAI client directly:
 openai>=1.10.0,<2.0.0
-bandit>=1.7.5 
+bandit>=1.7.5
