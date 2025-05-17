@@ -64,3 +64,17 @@ class SDKOptimizedAlgorithmResponse(TypedDict): # Or Pydantic
     benchmark_score: float
     generated_code_or_dag: str # Or a more structured DAG type
     message: Optional[str]
+# In apps/forgeiq-backend/app/api_models.py
+class OptimizeStrategyRequest(BaseModel):
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
+
+class OptimizedAlgorithmDetails(BaseModel):
+    algorithm_reference: str
+    benchmark_score: float
+    generated_code_or_dag: str # This could be a string or a more structured DAG model
+
+class OptimizeStrategyResponse(BaseModel):
+    message: str
+    optimization_details: Optional[OptimizedAlgorithmDetails] = None
+    status: str = "processing_initiated" # Or "completed" if synchronous
