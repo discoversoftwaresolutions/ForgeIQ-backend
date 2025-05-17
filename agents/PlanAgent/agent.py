@@ -343,3 +343,48 @@ class PlanAgent:
 async def main_async_runner(): # From response #61
     agent = PlanAgent()
     await agent.main_event
+# In agents/PlanAgent/app/agent.py, within the PlanAgent class:
+# Add ForgeIQClient to its __init__ if not already there for other purposes.
+# For this example, assume it gets an SDK client instance.
+
+# def __init__(self, event_bus: EventBus, shared_memory: SharedMemoryStore, sdk_client: ForgeIQClient):
+#     # ...
+#     self.sdk_client = sdk_client
+
+async def request_build_strategy_optimization(self, project_id: str, current_dag_def: DagDefinition) -> Optional[SDKOptimizedAlgorithmResponse]:
+    """Requests the AlgorithmAgent (via ForgeIQ-backend) to optimize a build strategy."""
+    if not self.sdk_client: # Assuming PlanAgent has self.sdk_client
+        logger.error(f"PlanAgent: ForgeIQ SDK client not available. Cannot request build strategy optimization for {project_id}.")
+        return None
+
+    logger.info(f"PlanAgent: Requesting build strategy optimization for project '{project_id}'.")
+    span = self._start_trace_span_if_available("request_build_strategy_optimization", project_id=project_id, dag_id=current_dag_def['dag_id'])
+
+    try:
+        with span: #type: ignore
+            # Prepare context for the AlgorithmAgent.
+            # The 'dag_representation' for AlgorithmContext could be the nodes list,
+            # or another serialized form of the DAG.
+            # Your AlgorithmAgent's prompt expects context['dag'].
+            sdk_context = SDKAlgorithmContext(
+                project_id=project_id,
+                dag_representation=current_dag_def.get("nodes", []), # Send nodes list as DAG representation
+                telemetry_data={"source_agent": "PlanAgent", "current_task_count": len(current_dag_def.get("nodes", []))}
+            )
+
+            optimized_strategy = await self.sdk_client.request_build_strategy_optimization(context=sdk_context)
+
+            if optimized_strategy:
+                logger.info(f"PlanAgent: Received optimized strategy for project '{project_id}': Ref {optimized_strategy.get('algorithm_reference')}")
+                if _trace_api and span: span.set_attribute("optimization.ref", optimized_strategy.get('algorithm_reference')); span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                # TODO: PlanAgent would then potentially use this optimized_strategy.generated_code_or_dag
+                # (which might be a new DagDefinition) for subsequent execution.
+                return optimized_strategy
+            else:
+                logger.warning(f"PlanAgent: No optimized strategy returned for project '{project_id}'.")
+                if _trace_api and span: span.set_attribute("optimization.received", False)
+                return None
+    except Exception as e:
+        logger.error(f"PlanAgent: Error requesting build strategy optimization for project '{project_id}': {e}", exc_info=True)
+        if _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
+        return None
