@@ -1,5 +1,5 @@
 # =================================================
-# 📁 apps/forgeiq-backend/app/dependencies.py
+# 📁 apps/forgeiq-backend/dependencies.py
 # =================================================
 import os
 import logging
