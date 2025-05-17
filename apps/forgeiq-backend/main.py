@@ -315,3 +315,92 @@ async def mcp_optimize_strategy_endpoint(
             raise HTTPException(status_code=502, detail=f"MCP service error: {e_http.response.status_code}")
         except Exception as e_call: # ... (handle error) ...
             raise HTTPException(status_code=500, detail=f"Internal error calling MCP: {str(e_call)}")
+# =====================================================================
+# 📁 apps/forgeiq-backend/app/main.py (additions for MCP endpoint)
+# =====================================================================
+# ... (existing imports: os, json, datetime, uuid, logging, asyncio, httpx, FastAPI, Depends, Security) ...
+# ... (existing Pydantic models from .api_models, including the new MCP ones) ...
+from .api_models import MCPStrategyApiRequest, MCPStrategyApiResponse, MCPStrategyApiDetails # Ensure these are imported
+# ... (existing core service initializations: event_bus_instance, message_router_instance, shared_memory_instance) ...
+# ... (existing private_intel_http_client for AlgorithmAgent) ...
+
+# --- NEW MCP API Endpoint ---
+@app.post("/api/forgeiq/mcp/optimize-strategy/{project_id}", 
+          response_model=MCPStrategyApiResponse, 
+          tags=["MCP Integration"],
+          summary="Request build strategy optimization from the private Master Control Program.",
+          dependencies=[Depends(get_api_key)]) # Secured endpoint
+async def mcp_optimize_strategy_endpoint(
+    project_id: str, 
+    request_data: MCPStrategyApiRequest, # Uses Pydantic model for request body
+    # Use the same httpx client configured for the private intelligence stack
+    intel_stack_client: httpx.AsyncClient = Depends(get_private_intel_client) 
+):
+    span_attrs = {"project_id": project_id, "mcp.goal": request_data.optimization_goal or "default"}
+    with _start_api_span("mcp_optimize_strategy", **span_attrs) as span: # type: ignore
+        logger.info(f"API: Forwarding optimize build strategy request for project '{project_id}' to private MCP.")
+
+        if not intel_stack_client: # Check if client was initialized
+            logger.error("Private Intelligence API client (for MCP) not initialized.")
+            if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "MCP client missing"))
+            raise HTTPException(status_code=503, detail="MCP service client not available.")
+
+        # Construct payload for your private MCP's API endpoint.
+        # This payload needs to match what your private MCP/controller.py (via intelligence_bridge.py) expects.
+        # For example, it might expect project_id in the path and other details in the body.
+        mcp_payload = {
+            "project_id": project_id, # MCP might re-verify or use this
+            "current_dag_snapshot": request_data.current_dag_snapshot,
+            "optimization_goal": request_data.optimization_goal,
+            "additional_context": request_data.additional_mcp_context
+            # Add any other fields your private MCP API requires
+        }
+
+        # Replace with the actual endpoint path on your private intelligence service for MCP strategy requests
+        private_mcp_api_endpoint = "/mcp/request-strategy" # Example endpoint path
+
+        try:
+            logger.debug(f"Calling private MCP at {private_mcp_api_endpoint} for project '{project_id}'.")
+            if _tracer and span: 
+                span.set_attribute("private_intel.target_service", "MCP")
+                span.set_attribute("private_intel.target_endpoint", private_mcp_api_endpoint)
+
+            response = await intel_stack_client.post(private_mcp_api_endpoint, json=mcp_payload)
+            response.raise_for_status() 
+
+            mcp_response_data = response.json() # Response from your private MCP
+            logger.info(f"Response from private MCP for '{project_id}': {message_summary(mcp_response_data)}")
+
+            # Adapt mcp_response_data to the MCPStrategyApiResponse Pydantic model
+            # This depends on the structure of the response from your private MCP.
+            strategy_details = None
+            if mcp_response_data.get("status") == "strategy_provided": # Example status from MCP
+                strategy_details = MCPStrategyApiDetails(
+                    strategy_id=mcp_response_data.get("strategy_id"),
+                    new_dag_definition_raw=mcp_response_data.get("new_dag_definition"), # Or "optimized_dag"
+                    directives=mcp_response_data.get("directives"),
+                    mcp_metadata=mcp_response_data.get("mcp_execution_details")
+                )
+
+            api_response_status = mcp_response_data.get("status", "MCP_RESPONSE_UNKNOWN")
+            if _trace_api and span: 
+                span.set_attribute("mcp.response_status", api_response_status)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+
+            return MCPStrategyApiResponse(
+                project_id=project_id,
+                status=api_response_status,
+                message=mcp_response_data.get("message"),
+                strategy_details=strategy_details
+            )
+
+        except httpx.HTTPStatusError as e_http:
+            err_msg = f"Error calling private MCP service: {e_http.response.status_code} - {e_http.response.text[:200]}"
+            logger.error(err_msg, exc_info=True)
+            if _trace_api and span: span.record_exception(e_http); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "MCP HTTP error"))
+            raise HTTPException(status_code=502, detail=f"Error communicating with MCP service: HTTP {e_http.response.status_code}")
+        except Exception as e_call:
+            err_msg = f"Error during private MCP call for project '{project_id}': {e_call}"
+            logger.error(err_msg, exc_info=True)
+            if _trace_api and span: span.record_exception(e_call); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "MCP call failed"))
+            raise HTTPException(status_code=500, detail=f"Internal error while calling MCP service: {str(e_call)}")
