@@ -235,4 +235,4 @@ class AgentRegistry:
             agent_info_or_id = args[0] if args else None
             agent_id_str = agent_info_or_id.get('agent_id') if isinstance(agent_info_or_id, dict) else str(agent_info_or_id)
             logger.info(f"LIFECYCLE: Agent Unregistered - ID: {agent_id_str}")
-    ```
+    
