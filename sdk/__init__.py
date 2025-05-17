@@ -3,8 +3,7 @@
 # 📁 sdk/__init__.py
 # =======================
 import logging # Good practice to configure a null handler for library logs by default
-
-from .client import ForgeIQClient
+from .build_system import BuildSystemClient # Add thisfrom .client import ForgeIQClient
 from .exceptions import ForgeIQSDKError, APIError, AuthenticationError, NotFoundError, RequestTimeoutError
 from .models import ( # Export key models users might need for type hinting or construction
     SDKDagDefinition, SDKDagNode, SDKDagExecutionStatus, 
@@ -17,6 +16,9 @@ from .models import ( # Export key models users might need for type hinting or c
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 
+__all__ = [
+    # ... existing exports ...
+    "BuildSystemClient" # Add this
 __all__ = [
     "ForgeIQClient",
     "ForgeIQSDKError",
