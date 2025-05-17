@@ -78,3 +78,26 @@ class OptimizeStrategyResponse(BaseModel):
     message: str
     optimization_details: Optional[OptimizedAlgorithmDetails] = None
     status: str = "processing_initiated" # Or "completed" if synchronous
+# =================================================================
+# 📁 sdk/models.py (additions for MCP interaction)
+# =================================================================
+# ... (existing SDK TypedDicts like SDKDagDefinition, etc.) ...
+
+class SDKMCPStrategyRequestContext(TypedDict):
+    """Context sent to request an MCP strategy."""
+    project_id: str
+    # current_dag_snapshot could be List[SDKDagNode], List[str] (task names), or more complex
+    current_dag_snapshot: Optional[List[Dict[str, Any]]] 
+    optimization_goal: Optional[str] # e.g., "reduce_build_time", "enhance_security_coverage"
+    additional_mcp_context: Optional[Dict[str, Any]]
+
+class SDKMCPStrategyResponse(TypedDict):
+    """Response from the MCP after a strategy request."""
+    project_id: str
+    strategy_id: Optional[str]
+    # new_dag_definition might be a full SDKDagDefinition or a set of modifications
+    new_dag_definition: Optional[SDKDagDefinition] # Or Dict[str, Any] if structure varies
+    directives: Optional[List[str]] # High-level instructions
+    status: str # e.g., "strategy_provided", "no_optimization_needed", "error"
+    message: Optional[str]
+    mcp_execution_details: Optional[Dict[str, Any]] # For any metadata from MCP
