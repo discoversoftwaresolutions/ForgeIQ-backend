@@ -1,4 +1,6 @@
-# agents/PlanAgent/agent.py
+# ====================================
+# 📁 agents/PlanAgent/agent.py
+# ====================================
 import os
 import json
 import datetime
@@ -8,327 +10,288 @@ import logging
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Set
 
-# --- Observability Setup ---
+# --- Observability Setup (as before) ---
 SERVICE_NAME = "PlanAgent"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format=f'%(asctime)s - {SERVICE_NAME} - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=LOG_LEVEL, format=f'%(asctime)s - {SERVICE_NAME} - %(name)s - %(levelname)s - %(message)s')
 tracer = None
 try:
+    from opentelemetry import trace
     from core.observability.tracing import setup_tracing
     tracer = setup_tracing(SERVICE_NAME)
 except ImportError:
-    logging.getLogger(SERVICE_NAME).warning(
-        "PlanAgent: Tracing setup failed. Ensure core.observability.tracing is available."
-    )
+    logging.getLogger(SERVICE_NAME).warning("PlanAgent: Tracing setup failed.")
 logger = logging.getLogger(__name__)
 # --- End Observability Setup ---
 
 from core.event_bus.redis_bus import EventBus, message_summary
-# Assuming your core modules are importable like this due to PYTHONPATH=/app
-from core.task_runner import run_task # Using the run_task from user's provided core.task_runner
-from core.build_graph import get_project_dag # This might be used for context or validation
-                                             # but BuildSurfAgent provides the primary DAG structure.
-
+from core.task_runner import run_task
+from core.shared_memory import SharedMemoryStore # <<< IMPORT SharedMemoryStore
 from interfaces.types.events import (
     DagDefinition, DagNode, DagDefinitionCreatedEvent,
     TaskStatus, TaskStatusUpdateEvent, DagExecutionStatusEvent
 )
 
-# Event channels
-DAG_DEFINITION_EVENT_CHANNEL_PATTERN = "events.project.*.dag.created" # Listens for DAGs
+# Event channels (as before)
+DAG_DEFINITION_EVENT_CHANNEL_PATTERN = "events.project.*.dag.created"
 TASK_STATUS_EVENT_CHANNEL_TEMPLATE = "events.project.{project_id}.dag.{dag_id}.task_status"
 DAG_EXECUTION_STATUS_CHANNEL_TEMPLATE = "events.project.{project_id}.dag.{dag_id}.execution_status"
 
+# Shared Memory Key for DAG status
+DAG_STATUS_SUMMARY_KEY_TEMPLATE = "dag_execution:{dag_id}:status_summary" # Key ForgeIQ-backend will query
+
 class PlanAgent:
     def __init__(self):
-        logger.info("Initializing PlanAgent...")
+        logger.info("Initializing PlanAgent (with SharedMemory for status)...")
         self.event_bus = EventBus()
-        self.active_dags: Dict[str, Dict[str, Any]] = {} # Store active DAGs being processed
+        self.shared_memory = SharedMemoryStore() # <<< INITIALIZE SharedMemoryStore
+        self.active_dags: Dict[str, Dict[str, Any]] = {}
         if not self.event_bus.redis_client:
-            logger.error("PlanAgent critical: EventBus not connected. Cannot process DAGs.")
+            logger.error("PlanAgent: EventBus not connected.")
+        if not self.shared_memory.redis_client:
+            logger.warning("PlanAgent: SharedMemoryStore not connected to Redis. Will not persist final DAG status.")
         logger.info("PlanAgent Initialized.")
 
     @property
-    def tracer(self):
+    def tracer_instance(self):
         return tracer
 
-    def _publish_task_status(self, project_id: Optional[str], dag_id: str, task_status: TaskStatus):
+    async def _store_final_dag_status(self, dag_id: str, status_event_data: DagExecutionStatusEvent):
+        """Stores the final DAG execution status summary in SharedMemoryStore."""
+        if not self.shared_memory.redis_client:
+            logger.warning(f"DAG {dag_id}: Cannot store final status, SharedMemoryStore not connected.")
+            return
+
+        status_key = DAG_STATUS_SUMMARY_KEY_TEMPLATE.format(dag_id=dag_id)
+        # The status_event_data is already a TypedDict matching SDKDagExecutionStatusModel closely
+        # We can store the whole event or a tailored summary. Let's store the event data.
+        try:
+            success = await self.shared_memory.set_value(
+                status_key, 
+                status_event_data, # This is a dict
+                expiry_seconds=7 * 24 * 60 * 60 # Store for 7 days, for example
+            )
+            if success:
+                logger.info(f"DAG {dag_id}: Final status summary stored to SharedMemory key '{status_key}'.")
+            else:
+                logger.error(f"DAG {dag_id}: Failed to store final status summary to SharedMemory for key '{status_key}'.")
+        except Exception as e:
+            logger.error(f"DAG {dag_id}: Exception storing final status to SharedMemory: {e}", exc_info=True)
+
+
+    def _publish_dag_status(self, project_id: Optional[str], dag_id: str, status: str, 
+                            all_task_statuses: List[TaskStatus], message: Optional[str]=None):
+        # ... (event construction as before) ...
+        dag_info = self.active_dags.get(dag_id, {})
+        start_time = dag_info.get("started_at", datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z")
+        completion_time = None
+        is_terminal_status = "COMPLETED" in status.upper() or "FAILED" in status.upper()
+        if is_terminal_status:
+            completion_time = datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+
+        event_data = DagExecutionStatusEvent(
+            event_type="DagExecutionStatusEvent",
+            project_id=project_id, dag_id=dag_id, status=status, message=message,
+            started_at=start_time, completed_at=completion_time,
+            task_statuses=all_task_statuses,
+            timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+        )
+        
+        if self.event_bus.redis_client:
+            channel = DAG_EXECUTION_STATUS_CHANNEL_TEMPLATE.format(project_id=project_id or "global", dag_id=dag_id)
+            self.event_bus.publish(channel, event_data)
+            logger.info(f"Published DagExecutionStatusEvent to {channel}: DAG {dag_id} status {status}")
+
+        # If it's a terminal status, also store it in SharedMemory
+        if is_terminal_status:
+            # We need to run this async task without blocking the publisher
+            asyncio.create_task(self._store_final_dag_status(dag_id, event_data))
+
+
+    # ... (rest of PlanAgent class: _publish_task_status, execute_dag_task, 
+    #      _process_dag_execution_cycle, execute_dag_orchestrator, 
+    #      handle_dag_definition_event, main_event_loop as defined in response #61) ...
+    # Ensure all these methods correctly use logger, self.tracer_instance, etc.
+    # I will re-paste the full class structure from response #61 with the modifications integrated.
+    
+    async def _publish_task_status(self, project_id: Optional[str], dag_id: str, task_status_data: TaskStatus): # Corrected definition from #61
         if self.event_bus.redis_client:
             event_data = TaskStatusUpdateEvent(
-                event_type="TaskStatusUpdateEvent",
-                project_id=project_id,
-                dag_id=dag_id,
-                task=task_status,
+                event_type="TaskStatusUpdateEvent", project_id=project_id, dag_id=dag_id,
+                task=task_status_data,
                 timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
             )
             channel = TASK_STATUS_EVENT_CHANNEL_TEMPLATE.format(project_id=project_id or "global", dag_id=dag_id)
             self.event_bus.publish(channel, event_data)
+            logger.debug(f"Published TaskStatusUpdateEvent to {channel}: {task_status_data}")
 
-    def _publish_dag_status(self, project_id: Optional[str], dag_id: str, status: str, task_statuses: List[TaskStatus], message: Optional[str]=None):
-        if self.event_bus.redis_client:
-            dag_info = self.active_dags.get(dag_id, {})
-            event_data = DagExecutionStatusEvent(
-                event_type="DagExecutionStatusEvent",
-                project_id=project_id,
-                dag_id=dag_id,
-                status=status,
-                message=message,
-                started_at=dag_info.get("started_at", datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"),
-                completed_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z" if "COMPLETED" in status or "FAILED" in status else None,
-                task_statuses=task_statuses,
-                timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
-            )
-            channel = DAG_EXECUTION_STATUS_CHANNEL_TEMPLATE.format(project_id=project_id or "global", dag_id=dag_id)
-            self.event_bus.publish(channel, event_data)
-
-
-    async def execute_dag(self, project_id: Optional[str], dag: DagDefinition):
-        dag_id = dag['dag_id']
-        span_name = f"execute_dag:{dag_id}"
-        parent_span_context = None # Extract from triggering event if possible
-
-        if not self.tracer: # Fallback
-            await self._execute_dag_logic(project_id, dag)
+    async def execute_dag_task(self, project_id: Optional[str], dag_id: str, task_id: str):
+        dag_state = self.active_dags.get(dag_id)
+        if not dag_state: logger.error(f"DAG {dag_id} not found. Cannot execute task {task_id}."); return
+        node_map: Dict[str, DagNode] = dag_state["node_map"]
+        task_def = node_map.get(task_id)
+        if not task_def:
+            logger.error(f"Task definition for {task_id} not found in DAG {dag_id}.")
+            dag_state["task_statuses"][task_id] = TaskStatus(task_id=task_id, status='FAILED', message="Task definition not found")
+            self._publish_task_status(project_id, dag_id, dag_state["task_statuses"][task_id])
             return
 
-        with self.tracer.start_as_current_span(span_name, context=parent_span_context) as span:
-            span.set_attributes({
-                "plan_agent.dag_id": dag_id,
-                "plan_agent.project_id": project_id or "N/A",
-                "plan_agent.node_count": len(dag.get("nodes", []))
-            })
-            logger.info(f"Starting execution for DAG ID: {dag_id}, Project: {project_id}")
-            self.active_dags[dag_id] = {
-                "dag": dag,
-                "task_statuses": {node['id']: TaskStatus(task_id=node['id'], status='PENDING') for node in dag['nodes']},
-                "completed_tasks": set(),
-                "running_tasks": set(),
-                "started_at": datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
-            }
-            self._publish_dag_status(project_id, dag_id, "STARTED", list(self.active_dags[dag_id]["task_statuses"].values()))
+        logger.info(f"DAG {dag_id}: Executing task '{task_id}' (Type: {task_def['task_type']}) for project '{project_id}'.")
+        current_task_status = TaskStatus(
+            task_id=task_id, status='RUNNING', 
+            started_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+        )
+        dag_state["task_statuses"][task_id] = current_task_status
+        self._publish_task_status(project_id, dag_id, current_task_status)
+        task_name_for_runner = task_def['task_type']
+        if task_def.get('command'):
+            logger.warning(f"DAG {dag_id}: Task '{task_id}' command {task_def['command']} present. Ensure task_runner handles this or maps task_type '{task_name_for_runner}'.")
+        
+        task_execution_project_context = project_id or dag_state["dag"].get("project_id", "default_project")
+        try:
+            loop = asyncio.get_running_loop()
+            task_result_dict = await loop.run_in_executor(None, run_task, task_name_for_runner, task_execution_project_context)
+            final_status_str = task_result_dict.get("status", "error").upper()
+            if final_status_str == "ERROR": final_status_str = "FAILED" 
+            current_task_status.update(
+                status=final_status_str, message=task_result_dict.get("reason") or task_result_dict.get("output"),
+                result_summary=task_result_dict.get("output", "")[:250],
+                completed_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+            )
+            logger.info(f"DAG {dag_id}: Task '{task_id}' completed with status: {final_status_str}")
+        except Exception as e:
+            logger.error(f"DAG {dag_id}: Exception during task '{task_id}': {e}", exc_info=True)
+            current_task_status.update(status='FAILED', message=str(e), completed_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z")
+        finally:
+            dag_state["task_statuses"][task_id] = current_task_status
+            self._publish_task_status(project_id, dag_id, current_task_status)
+            dag_state["running_tasks"].remove(task_id)
+            dag_state["completed_tasks"].add(task_id)
 
-            try:
-                await self._execute_dag_logic(project_id, dag)
-                # Final status will be published within _execute_dag_logic
-                span.set_status(trace.StatusCode.OK) # Assuming success if no exception bubbles up
-            except Exception as e:
-                logger.error(f"Critical error during DAG execution {dag_id}: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, f"DAG execution failed: {e}"))
-                # Ensure a final FAILED status is published if an unhandled exception occurs
-                final_task_statuses = list(self.active_dags.get(dag_id, {}).get("task_statuses", {}).values())
-                self._publish_dag_status(project_id, dag_id, "FAILED", final_task_statuses, message=str(e))
-            finally:
-                if dag_id in self.active_dags: # Cleanup
-                    del self.active_dags[dag_id]
+    async def _process_dag_execution_cycle(self, project_id: Optional[str], dag_id: str):
+        dag_state = self.active_dags.get(dag_id)
+        if not dag_state: logger.error(f"Cannot process cycle for DAG {dag_id}: Not found."); return
+        node_map: Dict[str, DagNode] = dag_state["node_map"]
+        in_degree: Dict[str, int] = dag_state["in_degree"]
+        task_statuses: Dict[str, TaskStatus] = dag_state["task_statuses"]
+        completed_tasks: Set[str] = dag_state["completed_tasks"]
+        running_tasks: Set[str] = dag_state["running_tasks"]
+        
+        runnable_tasks_this_cycle = [
+            task_id for task_id, degree in list(in_degree.items()) 
+            if degree == 0 and task_id not in completed_tasks and task_id not in running_tasks
+        ]
+        for task_id_to_run in runnable_tasks_this_cycle:
+            running_tasks.add(task_id_to_run)
+            asyncio.create_task(self.execute_dag_task(project_id, dag_id, task_id_to_run))
+        
+        if len(completed_tasks) == len(node_map):
+            all_successful = all(ts.get("status") == "SUCCESS" for ts in task_statuses.values() if ts.get("task_id") in completed_tasks) # Note: core.task_runner returns "success"
+            final_dag_status = "COMPLETED_SUCCESS" if all_successful else "COMPLETED_PARTIAL"
+            if any(ts.get("status") == "FAILED" for ts in task_statuses.values()): final_dag_status = "FAILED"
+            logger.info(f"DAG {dag_id} processing complete. Final status: {final_dag_status}")
+            self._publish_dag_status(project_id, dag_id, final_dag_status, list(task_statuses.values()))
+            if dag_id in self.active_dags: del self.active_dags[dag_id]
+            return True # DAG finished
 
+        if any(ts.get("status") == "FAILED" for ts in task_statuses.values()):
+            logger.error(f"DAG {dag_id} has failed tasks. Halting.")
+            self._publish_dag_status(project_id, dag_id, "FAILED", list(task_statuses.values()), "One or more tasks failed.")
+            if dag_id in self.active_dags: del self.active_dags[dag_id]
+            return True # DAG finished (due to failure)
+        return False # DAG still ongoing
 
-    async def _execute_dag_logic(self, project_id: Optional[str], dag: DagDefinition):
+    async def execute_dag_orchestrator(self, project_id: Optional[str], dag: DagDefinition):
         dag_id = dag['dag_id']
-        nodes: List[DagNode] = dag['nodes']
-        node_map: Dict[str, DagNode] = {node['id']: node for node in nodes}
-
-        # Build adjacency list and in-degree map for topological sort / dependency tracking
+        span = self._start_trace_span_if_available("execute_dag_orchestrator", dag_id=dag_id, project_id=project_id or "N/A")
+        logger.info(f"Orchestrating execution for DAG ID: {dag_id}, Project: {project_id}")
+        
+        nodes_list: List[DagNode] = dag['nodes']
+        node_map: Dict[str, DagNode] = {node['id']: node for node in nodes_list}
         adj: Dict[str, List[str]] = defaultdict(list)
-        in_degree: Dict[str, int] = {node['id']: 0 for node in nodes}
-
+        in_degree: Dict[str, int] = {node['id']: 0 for node in nodes_list}
         for node_id, node_data in node_map.items():
             for dep_id in node_data.get('dependencies', []):
-                adj[dep_id].append(node_id) # dep_id -> node_id means dep_id must run before node_id
-                in_degree[node_id] += 1
-
-        # Queue for nodes ready to run (in-degree is 0)
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        for node_id in in_degree:
-            if in_degree[node_id] == 0:
-                await queue.put(node_id)
-
-        dag_status_info = self.active_dags[dag_id]
-
-        while not queue.empty() or dag_status_info["running_tasks"]:
-            # Launch new tasks if any are ready and concurrency limits allow (not implemented here)
-            while not queue.empty():
-                task_id_to_run = await queue.get()
-                dag_status_info["running_tasks"].add(task_id_to_run)
-
-                task_def = node_map[task_id_to_run]
-                logger.info(f"DAG {dag_id}: Submitting task '{task_id_to_run}' ({task_def['task_type']}) for execution.")
-
-                task_status_obj = TaskStatus(
-                    task_id=task_id_to_run, status='RUNNING', 
-                    started_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
-                )
-                dag_status_info["task_statuses"][task_id_to_run] = task_status_obj
-                self._publish_task_status(project_id, dag_id, task_status_obj)
-
-                # Execute the task asynchronously
-                # The run_task function from core.task_runner is synchronous.
-                # To make this truly non-blocking, run_task would need to be async
-                # or run in a thread pool executor.
-                # For now, we'll await it if it were async, or run it in a thread.
-                # Let's assume run_task is synchronous and we run it in executor.
-                loop = asyncio.get_running_loop()
-
-                # Ensure project_id or a suitable project context is passed to run_task if needed.
-                # Your core.task_runner.run_task takes `project` as an argument.
-                # We need to ensure it's passed correctly. `BuildSurfAgent` may or may not put project_id in DAG itself.
-                # Using the overall project_id for now.
-                task_execution_project_context = project_id or dag.get("project_id", "default_project")
-
-                # Using user's provided core.task_runner.run_task
-                # It expects task (string, e.g. "lint") and project (string)
-                # The DAGNode has task_type, command, agent_handler, params.
-                # We need to map this to what core.task_runner.run_task expects.
-                # For this V0.1, if command is present, we use it. Otherwise, task_type.
-                task_name_for_runner = task_def['task_type']
-                if task_def.get('command'): # If a specific command list is given
-                    # This part needs refinement: core.task_runner.TASK_COMMANDS uses predefined commands.
-                    # If DAG node provides its own command, task_runner might need to execute it directly.
-                    # For now, let's assume task_type maps to a command in task_runner.
-                    # Or, if task_type is 'custom_script' and command is provided, task_runner needs to handle that.
-                    # This is a gap: the DAG from BuildSurf might be too generic for the current core.task_runner.
-                    # For now, just pass task_type.
-                    logger.warning(f"DAG {dag_id}: Task '{task_id_to_run}' has a command: {task_def['command']}. "
-                                   f"Current task_runner uses predefined commands for task_type: '{task_name_for_runner}'. "
-                                   "Refinement needed for custom commands.")
-
-                # We will use asyncio.to_thread to run the synchronous `run_task`
-                task_result_dict = await loop.run_in_executor(
-                    None,  # Use default ThreadPoolExecutor
-                    run_task, # This is from your core.task_runner
-                    task_name_for_runner, # Task name (e.g. "lint", "build")
-                    task_execution_project_context # Project context string
-                )
-
-                # Process task result
-                dag_status_info["running_tasks"].remove(task_id_to_run)
-                dag_status_info["completed_tasks"].add(task_id_to_run)
-
-                final_status = task_result_dict.get("status", "error").upper() # success -> SUCCESS
-                task_status_obj = TaskStatus(
-                    task_id=task_id_to_run, status=final_status,
-                    message=task_result_dict.get("reason") or task_result_dict.get("output"), # Simplified
-                    result_summary=task_result_dict.get("output", "")[:200], # Short summary
-                    started_at=dag_status_info["task_statuses"][task_id_to_run].get("started_at"),
-                    completed_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
-                )
-                dag_status_info["task_statuses"][task_id_to_run] = task_status_obj
-                self._publish_task_status(project_id, dag_id, task_status_obj)
-
-                if final_status == "SUCCESS":
-                    for neighbor_id in adj[task_id_to_run]:
-                        in_degree[neighbor_id] -= 1
-                        if in_degree[neighbor_id] == 0:
-                            await queue.put(neighbor_id)
-                else: # Task FAILED or SKIPPED due to unknown task
-                    logger.error(f"DAG {dag_id}: Task '{task_id_to_run}' failed or was skipped. Stopping DAG execution.")
-                    self._publish_dag_status(project_id, dag_id, "FAILED", list(dag_status_info["task_statuses"].values()), 
-                                             message=f"Task '{task_id_to_run}' failed.")
-                    return # Stop processing this DAG
-
-            if not dag_status_info["running_tasks"] and queue.empty(): # No more tasks to run or running
-                break
-
-            await asyncio.sleep(0.1) # Yield control to allow other tasks / event loop activities
-
-        # All tasks completed successfully
-        if len(dag_status_info["completed_tasks"]) == len(nodes):
-            logger.info(f"DAG {dag_id}: All tasks completed successfully.")
-            self._publish_dag_status(project_id, dag_id, "COMPLETED_SUCCESS", list(dag_status_info["task_statuses"].values()))
-        else:
-            # This case should ideally be caught earlier if a task fails
-            logger.warning(f"DAG {dag_id}: Exited loop but not all tasks completed. Status may be inconsistent.")
-            # Check if any tasks are still PENDING or RUNNING (should not happen if logic is correct)
-            # Publish a PARTIAL or FAILED status based on final states.
-            final_statuses = list(dag_status_info["task_statuses"].values())
-            if any(ts['status'] == 'FAILED' for ts in final_statuses):
-                 self._publish_dag_status(project_id, dag_id, "FAILED", final_statuses, message="One or more tasks failed.")
-            elif any(ts['status'] in ['PENDING', 'RUNNING'] for ts in final_statuses):
-                 self._publish_dag_status(project_id, dag_id, "COMPLETED_PARTIAL", final_statuses, message="DAG execution ended with incomplete tasks.")
-            else: # Should be success if all completed and none failed
-                 self._publish_dag_status(project_id, dag_id, "COMPLETED_SUCCESS", final_statuses)
-
+                if dep_id in node_map: adj[dep_id].append(node_id); in_degree[node_id] += 1
+                else: logger.error(f"DAG {dag_id}: Task '{node_id}' has unknown dependency '{dep_id}'.")
+        
+        self.active_dags[dag_id] = {
+            "dag": dag, "node_map": node_map, "adj": adj, "in_degree": in_degree,
+            "task_statuses": {node['id']: TaskStatus(task_id=node['id'], status='PENDING', message="Awaiting dependencies") for node in nodes_list},
+            "completed_tasks": set(), "running_tasks": set(),
+            "started_at": datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+        }
+        self._publish_dag_status(project_id, dag_id, "STARTED", list(self.active_dags[dag_id]["task_statuses"].values()))
+        
+        try:
+            with span: #type: ignore
+                while True:
+                    dag_finished = await self._process_dag_execution_cycle(project_id, dag_id)
+                    if dag_finished:
+                        if _tracer and _trace_api: span.set_attribute("plan_agent.dag_final_status", self.active_dags.get(dag_id, {}).get("final_status", "UNKNOWN_IN_TRACE"))
+                        break
+                    await asyncio.sleep(1) 
+                if _tracer and _trace_api: span.set_status(trace.StatusCode.OK)
+        except Exception as e:
+            logger.error(f"Critical error during DAG orchestration {dag_id}: {e}", exc_info=True)
+            if _tracer and _trace_api: span.record_exception(e); span.set_status(trace.StatusCode.ERROR)
+            final_statuses = list(self.active_dags.get(dag_id, {}).get("task_statuses", {}).values())
+            self._publish_dag_status(project_id, dag_id, "FAILED", final_statuses, message=f"Orchestration error: {e}")
+        finally:
+            if dag_id in self.active_dags: 
+                logger.info(f"Cleaning up active DAG {dag_id} post-orchestration.")
+                del self.active_dags[dag_id]
 
     async def handle_dag_definition_event(self, event_data_str: str):
-        span_name = "handle_dag_definition_event"
-        parent_context = None 
-
-        if not self.tracer: # Fallback
-            await self._handle_dag_definition_event_logic(event_data_str)
-            return
-
-        with self.tracer.start_as_current_span(span_name, context=parent_context) as span:
-            try:
-                event_data: DagDefinitionCreatedEvent = json.loads(event_data_str)
-                if not (event_data.get("event_type") == "DagDefinitionCreatedEvent" and 
-                        "dag" in event_data and "dag_id" in event_data["dag"]):
-                    logger.error(f"Malformed DagDefinitionCreatedEvent: {event_data_str[:200]}")
-                    span.set_status(trace.Status(trace.StatusCode.ERROR, "Malformed event"))
-                    return
-
-                dag_to_execute = event_data["dag"]
-                project_id = event_data.get("project_id")
-                span.set_attributes({
-                    "messaging.system": "redis",
-                    "plan_agent.dag_id": dag_to_execute["dag_id"],
-                    "plan_agent.project_id": project_id or "N/A",
-                    "plan_agent.request_id": event_data.get("request_id")
-                })
-                logger.info(f"PlanAgent handling DagDefinitionCreatedEvent for DAG: {dag_to_execute['dag_id']}")
-
-                # Schedule DAG execution (don't block the event listener)
-                asyncio.create_task(self.execute_dag(project_id, dag_to_execute))
-
-            except json.JSONDecodeError:
-                logger.error(f"Could not decode JSON from event: {event_data_str[:200]}")
-                span.set_status(trace.Status(trace.StatusCode.ERROR, "JSON decode error"))
-            except Exception as e:
-                logger.error(f"Error handling DagDefinitionCreatedEvent: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, "Event handling failed"))
-
+        # ... (logic from response #61, calls execute_dag_orchestrator via asyncio.create_task) ...
+        logger.debug(f"PlanAgent received raw event data: {message_summary(event_data_str)}")
+        try:
+            event: DagDefinitionCreatedEvent = json.loads(event_data_str) #type: ignore
+            if not (event.get("event_type") == "DagDefinitionCreatedEvent" and "dag" in event and "dag_id" in event["dag"]):
+                logger.error(f"Malformed DagDefinitionCreatedEvent: {event_data_str[:200]}"); return
+            dag_to_execute = event["dag"]
+            project_id = event.get("project_id")
+            logger.info(f"PlanAgent handling DagDefinitionCreatedEvent for DAG: {dag_to_execute['dag_id']}, Project: {project_id}")
+            asyncio.create_task(self.execute_dag_orchestrator(project_id, dag_to_execute))
+        except json.JSONDecodeError: logger.error(f"Could not decode JSON from DagDefinitionCreatedEvent: {event_data_str[:200]}")
+        except Exception as e: logger.error(f"Error handling DagDefinitionCreatedEvent: {e}", exc_info=True)
 
     async def main_event_loop(self):
-        if not self.event_bus.redis_client:
-            logger.critical("PlanAgent: Cannot start, EventBus not connected.")
-            return
-
+        # ... (logic from response #61, subscribes to DAG_DEFINITION_EVENT_CHANNEL_PATTERN) ...
+        if not self.event_bus.redis_client: logger.critical("PlanAgent: EventBus not connected. Exiting."); await asyncio.sleep(60); return
         pubsub = self.event_bus.subscribe_to_channel(DAG_DEFINITION_EVENT_CHANNEL_PATTERN)
-        if not pubsub:
-            logger.critical(f"PlanAgent: Failed to subscribe to {DAG_DEFINITION_EVENT_CHANNEL_PATTERN}. Worker cannot start.")
-            return
-
-        logger.info(f"PlanAgent worker subscribed to {DAG_DEFINITION_EVENT_CHANNEL_PATTERN}, listening for DAGs...")
+        if not pubsub: logger.critical(f"PlanAgent: Failed to subscribe. Exiting."); await asyncio.sleep(60); return
+        logger.info(f"PlanAgent worker subscribed to '{DAG_DEFINITION_EVENT_CHANNEL_PATTERN}', listening for DAGs...")
         try:
             while True:
                 message = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0)
-                if message and message["type"] == "pmessage": # pmessage for pattern subscriptions
-                    await self.handle_dag_definition_event(message["data"])
+                if message and message["type"] == "pmessage":
+                    span_name = "plan_agent.process_dag_definition_event_from_bus"
+                    if not self.tracer_instance: await self.handle_dag_definition_event(message["data"])
+                    else:
+                        with self.tracer_instance.start_as_current_span(span_name) as span:
+                            span.set_attributes({"messaging.system": "redis", "messaging.destination.name": message.get("channel")})
+                            await self.handle_dag_definition_event(message["data"])
                 await asyncio.sleep(0.01) 
-        except KeyboardInterrupt:
-            logger.info("PlanAgent event loop interrupted.")
-        except Exception as e:
-            logger.error(f"Critical error in PlanAgent event loop: {e}", exc_info=True)
+        except KeyboardInterrupt: logger.info("PlanAgent event loop interrupted.")
+        except Exception as e: logger.error(f"Critical error in PlanAgent event loop: {e}", exc_info=True)
         finally:
-            logger.info("PlanAgent shutting down pubsub...")
+            logger.info("PlanAgent shutting down pubsub...");
             if pubsub:
-                try: await asyncio.to_thread(pubsub.punsubscribe, DAG_DEFINITION_EVENT_CHANNEL_PATTERN)
-                except: pass
-                try: await asyncio.to_thread(pubsub.close)
-                except: pass
+                try: 
+                    await asyncio.to_thread(pubsub.punsubscribe, DAG_DEFINITION_EVENT_CHANNEL_PATTERN)
+                    await asyncio.to_thread(pubsub.close)
+                except Exception as e_close: logger.error(f"Error closing pubsub for PlanAgent: {e_close}")
             logger.info("PlanAgent shutdown complete.")
 
-async def main():
+async def main_async_runner():
     agent = PlanAgent()
     await agent.main_event_loop()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(main_async_runner())
     except KeyboardInterrupt:
         logger.info("PlanAgent main execution stopped by user.")
     except Exception as e:
-        logger.critical(f"PlanAgent failed to start or unhandled error in main: {e}", exc_info=True)
+        logger.critical(f"PlanAgent failed to start or unhandled error: {e}", exc_info=True)
