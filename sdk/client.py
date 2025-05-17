@@ -227,3 +227,73 @@ async def request_mcp_build_strategy(
     # Pydantic models in the backend handle the exact API contract.
     # The SDK might just pass through the dict or could re-validate with TypedDicts/Pydantic.
     return SDKMCPStrategyResponse(**response_data) #type: ignore
+# =================================================================
+# FILE: sdk/client.py (Showing additions/updates to ForgeIQClient)
+# =================================================================
+import logging # Ensure this is at the top of your sdk/client.py
+import uuid # Ensure this is at the top if other methods use it for default IDs
+from typing import Optional, Dict, Any, List # Ensure these are at the top
+
+# Assuming these are correctly defined in your sdk/exceptions.py and sdk/models.py
+from .exceptions import APIError, AuthenticationError, NotFoundError, RequestTimeoutError, ForgeIQSDKError
+from .models import (
+    SDKDagDefinition, SDKDagExecutionStatus, SDKDeploymentStatus,
+    # Add the new response type for apply_proprietary_algorithm if you define one:
+    # SDKApplyAlgorithmResponse # Example
+)
+# import httpx # httpx is used by _request, ensure it's imported where _request is defined or http_client is init
+
+# Get a logger for the SDK client module
+logger = logging.getLogger(__name__) # Standard practice for library logging
+
+
+class ForgeIQClient:
+    # ... (existing __init__, close, _request, and other SDK methods) ...
+
+    async def apply_proprietary_algorithm(
+        self,
+        algorithm_id: str,
+        context_data: Dict[str, Any],
+        project_id: Optional[str] = None
+    ) -> Dict[str, Any]: # For V0.1, returning a Dict. Ideally, map to a specific SDK model.
+        """
+        Invokes a named proprietary algorithm via the ForgeIQ-backend.
+
+        :param algorithm_id: The ID of the proprietary algorithm to run (e.g., "CABGP", "RBCP").
+        :param context_data: Input data and context required by the algorithm.
+        :param project_id: Optional project ID if the algorithm is project-specific.
+        :return: A dictionary containing the result from the algorithm execution.
+                 It's recommended to define a specific SDK model (e.g., SDKApplyAlgorithmResponse)
+                 in sdk/models.py for this response for better type safety.
+        :raises APIError: If the backend API returns an error.
+        :raises ForgeIQSDKError: For other SDK-level errors.
+        """
+        endpoint = "/api/forgeiq/algorithms/apply" # Matches the public ForgeIQ-backend endpoint
+        payload = {
+            "algorithm_id": algorithm_id,
+            "project_id": project_id,
+            "context_data": context_data
+        }
+        
+        logger.info(
+            f"SDK: Requesting application of proprietary algorithm '{algorithm_id}'"
+            f" for project '{project_id if project_id else 'N/A'}'."
+        )
+        logger.debug(f"SDK: Payload for '{algorithm_id}': {str(payload)[:200]}...") # Log snippet of payload
+
+        # self._request is assumed to be an existing async method in ForgeIQClient
+        # that handles the actual httpx call, error handling, and JSON parsing.
+        try:
+            response_data = await self._request("POST", endpoint, json_data=payload)
+            # If you have an SDKApplyAlgorithmResponse model:
+            # from .models import SDKApplyAlgorithmResponse
+            # return SDKApplyAlgorithmResponse(**response_data)
+            return response_data # Return raw dict for now
+        except Exception as e:
+            logger.error(f"SDK: Failed to apply proprietary algorithm '{algorithm_id}': {e}", exc_info=True)
+            # Re-raise the original error if it's an SDK-defined one, or wrap it
+            if isinstance(e, ForgeIQSDKError):
+                raise
+            raise ForgeIQSDKError(f"Failed to apply algorithm '{algorithm_id}': {str(e)}") from e
+
+    # ... (other existing SDK methods like submit_pipeline_prompt, generate_code_via_api, etc.) ...
