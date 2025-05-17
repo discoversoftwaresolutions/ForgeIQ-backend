@@ -1,6 +1,6 @@
-# ===================================================
-# 📁 apps/forgeiq-backend/main.py (Refined Code Gen)
-# ===================================================
+# =====================================================================
+# 📁 apps/forgeiq-backend/main.py (V0.5 - Calls specific AlgorithmAgent)
+# =====================================================================
 import os
 import json
 import datetime
@@ -9,8 +9,8 @@ import logging
 import asyncio
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, Body, Depends
-# from starlette.responses import JSONResponse # Keep if you add custom global error handlers
+import httpx # For calling private intelligence API
+from fastapi import FastAPI, HTTPException, Body, Query
 
 # --- Observability Setup (as before) ---
 SERVICE_NAME = "ForgeIQ_Backend_Py"
@@ -27,177 +27,175 @@ except ImportError: logging.getLogger(SERVICE_NAME).warning("ForgeIQ-Backend: Tr
 logger = logging.getLogger(__name__)
 # --- End Observability Setup ---
 
-# Core service imports (as before)
+# Core service imports
 from core.event_bus.redis_bus import EventBus
-from core.message_router import MessageRouter # Assuming MessageRouteNotFoundError, InvalidMessagePayloadError are exported from its __init__
+from core.message_router import MessageRouter # MessageRouteNotFoundError, InvalidMessagePayloadError
 from core.shared_memory import SharedMemoryStore
+from core.build_graph import get_project_dag # To fetch DAG for AlgorithmAgent
 # ... other core imports ...
 
-from .api_models import ( # Ensure all Pydantic models are imported
-    PipelineGenerateRequest, PipelineGenerateResponse,
-    DeploymentTriggerRequest, DeploymentTriggerResponse,
-    SDKDagExecutionStatusModel, SDKDeploymentStatusModel,
-    ProjectConfigResponse, BuildGraphResponse, TaskListResponse, TaskDefinitionModel,
-    CodeGenerationRequest, CodeGenerationResponse, GeneratedCodeOutput, CodeGenerationPrompt # These are key
+from .api_models import ( 
+    CodeGenerationRequest, CodeGenerationResponse, GeneratedCodeOutput, CodeGenerationPrompt,
+    # ... other existing API models ...
 )
 
-# --- LLM Client Initialization for "Codex" Code Generation ---
-# This uses the OpenAI library, targeting models capable of code generation.
-CODE_GENERATION_LLM_API_KEY = os.getenv("CODE_GENERATION_LLM_API_KEY", os.getenv("OPENAI_API_KEY")) # Allow specific or general OpenAI key
-CODE_GENERATION_LLM_MODEL_NAME = os.getenv("CODE_GENERATION_LLM_MODEL_NAME", "gpt-4o") # Default to a strong code model
-CODE_GENERATION_LLM_API_BASE_URL = os.getenv("CODE_GENERATION_LLM_API_BASE_URL") # For proxies or Azure OpenAI
+# --- Configuration for Private Intelligence Stack API ---
+PRIVATE_INTEL_API_BASE_URL = os.getenv("PRIVATE_INTELLIGENCE_API_BASE_URL")
+PRIVATE_INTEL_API_KEY = os.getenv("PRIVATE_INTELLIGENCE_API_KEY")
 
-llm_code_client = None # This is our "Codex" interaction client
-if CODE_GENERATION_LLM_API_KEY:
+private_intel_http_client: Optional[httpx.AsyncClient] = None
+if PRIVATE_INTEL_API_BASE_URL:
+    headers = {"Content-Type": "application/json"}
+    if PRIVATE_INTEL_API_KEY:
+        headers["Authorization"] = f"Bearer {PRIVATE_INTEL_API_KEY}"
     try:
-        from openai import AsyncOpenAI # Ensure 'openai' is in root requirements.txt
-        client_args = {"api_key": CODE_GENERATION_LLM_API_KEY}
-        if CODE_GENERATION_LLM_API_BASE_URL:
-            client_args["base_url"] = CODE_GENERATION_LLM_API_BASE_URL
-        llm_code_client = AsyncOpenAI(**client_args)
-        logger.info(f"Codex/Code Generation LLM client initialized. Target Model: {CODE_GENERATION_LLM_MODEL_NAME}.")
-    except ImportError:
-        logger.error("OpenAI Python client not installed. Code generation via API will fail. Please add 'openai' to requirements.txt")
-    except Exception as e:
-        logger.error(f"Failed to initialize Codex/Code Generation LLM client: {e}")
+        private_intel_http_client = httpx.AsyncClient(base_url=PRIVATE_INTEL_API_BASE_URL, headers=headers, timeout=180.0) # Longer timeout for AI
+        logger.info(f"HTTP client for Private Intelligence API initialized, targeting: {PRIVATE_INTEL_API_BASE_URL}")
+    except Exception as e_intel_client:
+        logger.error(f"Failed to initialize HTTP client for Private Intelligence API: {e_intel_client}", exc_info=True)
 else:
-    logger.warning("CODE_GENERATION_LLM_API_KEY not set. Code generation endpoint will be non-functional.")
-# --- End LLM Client Initialization ---
+    logger.warning("PRIVATE_INTELLIGENCE_API_BASE_URL not set. Specialized code/algorithm generation will be unavailable.")
+# --- End Private Intelligence Stack API Config ---
 
 # Initialize other core services (EventBus, MessageRouter, SharedMemoryStore) as before
+# ...
 event_bus_instance = EventBus()
-message_router_instance = MessageRouter(event_bus_instance)
+message_router_instance = MessageRouter(event_bus_instance) # Requires event_bus_instance
 shared_memory_instance = SharedMemoryStore()
 
+
 app = FastAPI(
-    title="ForgeIQ Backend API (Python with Codex)",
-    description="API Gateway for ForgeIQ, featuring LLM-powered code generation.",
-    version="2.0.3" 
+    title="ForgeIQ Backend API (Python)",
+    description="API Gateway for ForgeIQ, integrates with Private AlgorithmAgent.",
+    version="2.0.5" 
 )
-# ... (FastAPI OTel Instrumentation as before) ...
-if _tracer:
+if _tracer: # Apply FastAPI OTel Instrumentation
     try: FastAPIInstrumentor.instrument_app(app, tracer_provider=_tracer.provider if _tracer else None) #type: ignore
     except Exception as e_otel_fastapi: logger.error(f"Failed to instrument FastAPI: {e_otel_fastapi}")
 
+def _start_api_span(name: str, **attrs): # Helper from before
+    if _tracer:
+        span = _tracer.start_as_current_span(f"api.{name}")
+        for k,v in attrs.items(): span.set_attribute(k,v)
+        return span
+    class NoOpSpanCM:
+        def __enter__(self): return None
+        def __exit__(self,et,ev,tb): pass
+    return NoOpSpanCM()
 
-# ... (Existing /api/health and other API endpoints as defined in response #70) ...
-@app.get("/api/health", tags=["Health"], summary="Health check for ForgeIQ Backend")
-async def health_check():
-    # ... (from response #70) ...
-    with _start_api_span_if_available("health_check"): #type: ignore
-        logger.info("API /api/health invoked")
-        redis_ok = False
-        if event_bus_instance.redis_client: # Check one of the redis clients
-            try:
-                await asyncio.to_thread(event_bus_instance.redis_client.ping)
-                redis_ok = True
-            except Exception: redis_ok = False
-        return {
-            "service_name": SERVICE_NAME, "status": "healthy",
-            "timestamp": datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
-            "codex_llm_client_status": "initialized" if llm_code_client else "not_initialized",
-            "redis_connection_status": "connected" if redis_ok else "disconnected_or_error"
-        }
+# ... (Existing /api/health and other API endpoints as defined in response #70 & #72 remain) ...
 
-
-# === "Codex" Code Generation API Endpoint ===
+# === MODIFIED Code Generation API Endpoint ===
+# This endpoint now primarily acts as a proxy to your private AlgorithmAgent for specific tasks.
 @app.post("/api/forgeiq/code/generate", 
           response_model=CodeGenerationResponse, 
-          tags=["Codex (Code Generation)"],
-          summary="Generate code based on a prompt using a configured LLM (Codex-capable).")
-async def codex_generate_code_endpoint(request_data: CodeGenerationRequest):
-    # Use a more descriptive span name reflecting "Codex"
-    span_attrs = {"codex.request_id": request_data.request_id, "codex.project_id": request_data.prompt_details.project_id}
-    # Ensure _start_trace_span_if_available is defined in this file or imported correctly
-    span_context_manager = _start_trace_span_if_available("codex_generate_code", **span_attrs) #type: ignore
+          tags=["Code Generation (via AlgorithmAgent)"],
+          summary="Generate specialized algorithms or code using the Private Intelligence Stack.")
+async def generate_algorithm_via_private_intel_endpoint(request_data: CodeGenerationRequest):
+    # This endpoint now expects prompts suitable for your private AlgorithmAgent.
+    # The `request_data.prompt_details` should contain information that can be mapped
+    # to the `AlgorithmContext` (project, dag, telemetry) your private agent expects.
 
-    try:
-        with span_context_manager as span: #type: ignore
-            logger.info(f"API /code/generate (Codex): ReqID '{request_data.request_id}', Lang: {request_data.prompt_details.language}")
+    flow_id = request_data.request_id # Use the request_id as a flow identifier
+    span_attrs = {"codegen.request_id": flow_id, "codegen.project_id": request_data.prompt_details.project_id}
+    with _start_api_span("generate_algorithm_private_intel", **span_attrs) as span: # type: ignore
 
-            if not llm_code_client:
-                logger.error("Codex LLM client not initialized. Cannot process code generation request.")
-                if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Codex LLM client not initialized"))
-                raise HTTPException(status_code=503, detail="Code generation service (Codex) not available.")
+        logger.info(f"API /code/generate: Received request '{flow_id}' for project '{request_data.prompt_details.project_id}'. Forwarding to AlgorithmAgent.")
 
-            prompt_details = request_data.prompt_details
+        if not private_intel_http_client:
+            logger.error("Private Intelligence API client (for AlgorithmAgent) not initialized.")
+            if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "AlgorithmAgent client not initialized"))
+            raise HTTPException(status_code=503, detail="Algorithm generation service not available.")
 
-            # Construct messages for the ChatCompletion API (suited for models like gpt-3.5-turbo, gpt-4)
-            # For older pure completion models (like code-davinci-002 if still accessible),
-            # you would use `llm_code_client.completions.create` with a single `prompt` string.
-            system_message = f"You are an expert code generation assistant, referred to as Codex. Your task is to generate clean, correct, and production-ready code. Target language: {prompt_details.language or 'not specified, infer if possible'}."
-            if prompt_details.project_id:
-                system_message += f" The code is for project context: {prompt_details.project_id}."
+        project_id_for_algo = request_data.prompt_details.project_id
+        if not project_id_for_algo:
+            logger.error(f"Request '{flow_id}': project_id is required in prompt_details to fetch DAG for AlgorithmAgent.")
+            raise HTTPException(status_code=400, detail="project_id must be specified in prompt_details for algorithm generation.")
 
-            user_messages_list = []
-            user_messages_list.append({"role": "system", "content": system_message})
-            if prompt_details.existing_code_context:
-                user_messages_list.append({"role": "user", "content": f"Consider this existing code as context (you might be completing, refactoring, or using it as reference):\n```\n{prompt_details.existing_code_context}\n```\n\nNow, based on the following request, generate the code:"})
-            user_messages_list.append({"role": "user", "content": prompt_details.prompt_text})
+        # 1. Fetch or determine the DAG for the project
+        # The private AlgorithmAgent's prompt seems to expect a DAG: "optimize this build DAG: {context['dag']}"
+        # We use our core.build_graph.get_project_dag which returns a list of task strings (the sequence).
+        # Your private AlgorithmAgent might expect a more detailed DAG structure (nodes with dependencies).
+        # For now, we'll pass this sequence. This might need alignment.
+        dag_sequence_for_project: List[str] = get_project_dag(project_id_for_algo)
+        if not dag_sequence_for_project:
+            logger.warning(f"Request '{flow_id}': No DAG sequence found for project '{project_id_for_algo}' via core.build_graph. Sending empty list to AlgorithmAgent.")
 
-            try:
-                logger.debug(f"Sending to Codex LLM (Model: {CODE_GENERATION_LLM_MODEL_NAME}). Max Tokens: {prompt_details.max_tokens}, Temp: {prompt_details.temperature}")
-                if _tracer and span: span.set_attribute("llm.request.model", CODE_GENERATION_LLM_MODEL_NAME)
+        # 2. Prepare telemetry (placeholder for V0.1)
+        telemetry_data: Dict[str, Any] = {
+            "source_prompt": request_data.prompt_details.prompt_text,
+            "requested_by_sdk": True,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
 
-                completion = await llm_code_client.chat.completions.create(
-                    model=CODE_GENERATION_LLM_MODEL_NAME,
-                    messages=user_messages_list, #type: ignore
-                    max_tokens=prompt_details.max_tokens,
-                    temperature=prompt_details.temperature,
-                    # Add other relevant parameters like 'stop' sequences if needed
+        # 3. Construct payload for the private AlgorithmAgent's /generate endpoint
+        algorithm_agent_payload = {
+            "project": project_id_for_algo,
+            "dag": dag_sequence_for_project, # This is List[str]
+            "telemetry": telemetry_data
+            # The prompt for the LLM within AlgorithmAgent is constructed there.
+            # The user_prompt_text from request_data.prompt_details might be used by AlgorithmAgent
+            # as part of its internal context for building its own LLM prompt.
+        }
+        if request_data.prompt_details.additional_context: # Pass along any extra context
+            algorithm_agent_payload.update(request_data.prompt_details.additional_context)
+
+
+        private_api_endpoint = "/generate" # Endpoint in your private AlgorithmAgent
+
+        try:
+            logger.debug(f"Flow {flow_id}: Calling private AlgorithmAgent at {private_api_endpoint} with project '{project_id_for_algo}'.")
+            if _tracer and span: 
+                span.set_attribute("private_intel.target_endpoint", private_api_endpoint)
+                span.set_attribute("private_intel.payload_project", project_id_for_algo)
+                span.set_attribute("private_intel.payload_dag_tasks_count", len(dag_sequence_for_project))
+
+            response = await private_intel_http_client.post(private_api_endpoint, json=algorithm_agent_payload)
+            response.raise_for_status() 
+
+            private_api_response_data = response.json() # Expects {"reference": ref, "score": evaluated, "code": generated["code"]}
+            logger.debug(f"Flow {flow_id}: Private AlgorithmAgent raw response: {message_summary(private_api_response_data, 300)}")
+
+            generated_algo_code = private_api_response_data.get("code")
+            algo_ref = private_api_response_data.get("reference")
+            algo_score = private_api_response_data.get("score")
+
+            if _tracer and span:
+                span.set_attribute("private_intel.response.algo_ref", algo_ref or "N/A")
+                span.set_attribute("private_intel.response.algo_score", str(algo_score))
+
+            if generated_algo_code is not None:
+                logger.info(f"Flow {flow_id}: Algorithm generated successfully by private AlgorithmAgent. Ref: {algo_ref}")
+                output = GeneratedCodeOutput( # Reusing this model, but context is algorithm
+                    generated_code=str(generated_algo_code),
+                    language_detected="python", # Assuming AlgorithmAgent generates Python
+                    model_used=f"ProprietaryAlgorithmAgent(score:{algo_score}, ref:{algo_ref})",
+                    finish_reason="algorithm_generated",
+                    usage_tokens=None # Not directly from a public LLM call here
                 )
+                if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                return CodeGenerationResponse(request_id=flow_id, status="success", output=output)
+            else:
+                err_msg = f"Private AlgorithmAgent returned no 'code' for ReqID '{flow_id}'."
+                logger.error(err_msg)
+                if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "AlgorithmAgent no code"))
+                raise HTTPException(status_code=500, detail=err_msg)
 
-                generated_text = completion.choices[0].message.content if completion.choices and completion.choices[0].message else None
-                finish_reason = completion.choices[0].finish_reason if completion.choices else "unknown"
-                usage_data = completion.usage
-
-                if _tracer and span:
-                    span.set_attribute("llm.response.finish_reason", finish_reason or "")
-                    if usage_data:
-                        span.set_attribute("llm.usage.prompt_tokens", usage_data.prompt_tokens)
-                        span.set_attribute("llm.usage.completion_tokens", usage_data.completion_tokens)
-                        span.set_attribute("llm.usage.total_tokens", usage_data.total_tokens)
-
-                if generated_text:
-                    logger.info(f"Codex code generation successful for ReqID '{request_data.request_id}'. Finish: {finish_reason}")
-                    # Attempt to clean up common LLM code block fences if present
-                    if "```" in generated_text:
-                        code_match = re.search(r"```(?:\w*\n)?(.*)```", generated_text, re.DOTALL | re.MULTILINE)
-                        if code_match:
-                            generated_text = code_match.group(1).strip()
-
-                    output = GeneratedCodeOutput(
-                        generated_code=generated_text,
-                        language_detected=prompt_details.language, # Or try to infer from generated_text
-                        model_used=CODE_GENERATION_LLM_MODEL_NAME, # Or completion.model
-                        finish_reason=finish_reason,
-                        usage_tokens=usage_data.model_dump() if usage_data else None #type: ignore
-                    )
-                    if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
-                    return CodeGenerationResponse(request_id=request_data.request_id, status="success", output=output)
-                else:
-                    err_msg = f"Codex LLM returned no content for ReqID '{request_data.request_id}'. Finish reason: {finish_reason}"
-                    logger.error(err_msg)
-                    if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "LLM no content"))
-                    raise HTTPException(status_code=500, detail=err_msg)
-
-            except Exception as e_llm:
-                err_msg = f"Error during Codex LLM call for code generation (ReqID '{request_data.request_id}'): {e_llm}"
-                logger.error(err_msg, exc_info=True)
-                if _trace_api and span: span.record_exception(e_llm); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "LLM API call failed"))
-                raise HTTPException(status_code=502, detail=f"Error communicating with Codex/code generation service: {str(e_llm)}")
-    except HTTPException: # Re-raise HTTPExceptions directly
-        raise
-    except Exception as e_outer: # Catch any other unexpected error in the endpoint
-        logger.error(f"Outer error in /code/generate endpoint for ReqID '{request_data.request_id}': {e_outer}", exc_info=True)
+        except httpx.HTTPStatusError as e_http:
+            err_msg = f"Error calling private AlgorithmAgent (ReqID '{flow_id}'): {e_http.response.status_code} - {e_http.response.text[:200]}"
+            logger.error(err_msg, exc_info=True)
+            if _trace_api and span: span.record_exception(e_http); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Private AlgoAgent HTTP error"))
+            raise HTTPException(status_code=502, detail=f"Error communicating with AlgorithmAgent service: HTTP {e_http.response.status_code}")
+        except Exception as e_algo_call:
+            err_msg = f"Error during private AlgorithmAgent call (ReqID '{flow_id}'): {e_algo_call}"
+            logger.error(err_msg, exc_info=True)
+            if _trace_api and span: span.record_exception(e_algo_call); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Private AlgoAgent call failed"))
+            raise HTTPException(status_code=502, detail=f"Error communicating with AlgorithmAgent service: {str(e_algo_call)}")
+    except HTTPException: 
+        raise 
+    except Exception as e_outer: 
+        logger.error(f"Outer error in /code/generate endpoint for ReqID '{flow_id}': {e_outer}", exc_info=True)
         if _trace_api and span: span.record_exception(e_outer); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Outer endpoint error"))
         raise HTTPException(status_code=500, detail="Internal server error in code generation endpoint.")
 
-
-# ... (Other existing API endpoints: /pipelines/generate, /dags/status, /deployments/trigger, etc. from response #70) ...
-# ... (Ensure they also have the _start_api_span_if_available helper integrated if desired) ...
-# ... (Ensure Uvicorn startup is handled by Dockerfile CMD) ...
-
-# At the end of the file, before if __name__ == "__main__" if you have one for local uvicorn run
-# you'd need to import `re` if the cleanup for generated_text uses it.
-import re # For cleaning up LLM code output
+# ... (Other existing API endpoints and Uvicorn startup via Dockerfile CMD)
