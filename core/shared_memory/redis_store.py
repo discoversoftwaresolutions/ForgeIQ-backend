@@ -222,4 +222,4 @@ class SharedMemoryStore:
             logger.error(f"Unexpected error checking existence for key '{full_key}': {e}", exc_info=True)
             if tracer and trace_api: span.record_exception(e); span.set_status(trace_api.Status(trace_api.StatusCode.ERROR, "Unexpected error"))
         return False
-    ```
+    
