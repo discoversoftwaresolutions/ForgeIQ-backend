@@ -1,2 +1,1 @@
 _all__ = ["SharedMemoryStore"]
-    ```
