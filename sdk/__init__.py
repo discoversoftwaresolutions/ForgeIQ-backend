@@ -32,3 +32,11 @@ __all__ = [
     "SDKTaskStatus", 
     "SDKDeploymentStatus",
     "SDKFileChange"
+
+# This makes 'sdk' a sub-package of 'interfaces'.
+# It can export specific client utilities or interfaces if needed.
+from .debugiq_sdk import DebugIQClient
+from .codenav_sdk import CodeNavSDKClient
+# from .agent_client import GenericAgentClient (if we define it)
+
+__all__ = ["DebugIQClient", "CodeNavSDKClient"]
