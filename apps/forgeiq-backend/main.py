@@ -404,3 +404,42 @@ async def mcp_optimize_strategy_endpoint(
             logger.error(err_msg, exc_info=True)
             if _trace_api and span: span.record_exception(e_call); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "MCP call failed"))
             raise HTTPException(status_code=500, detail=f"Internal error while calling MCP service: {str(e_call)}")
+# In apps/forgeiq-backend/app/main.py
+# ... (existing imports, including private_intel_http_client and get_private_intel_client) ...
+from .api_models import ApplyAlgorithmRequest, ApplyAlgorithmResponse # Add these
+
+@app.post("/api/forgeiq/algorithms/apply", 
+          response_model=ApplyAlgorithmResponse, 
+          tags=["Proprietary Algorithms"],
+          summary="Apply a named proprietary algorithm via the Private Intelligence Stack.",
+          dependencies=[Depends(get_api_key)])
+async def apply_proprietary_algorithm_endpoint(
+    request_data: ApplyAlgorithmRequest,
+    intel_stack_client: httpx.AsyncClient = Depends(get_private_intel_client)
+):
+    span_attrs = {"algorithm_id": request_data.algorithm_id, "project_id": request_data.project_id}
+    with _start_api_span("apply_proprietary_algorithm", **span_attrs) as span: # type: ignore
+        logger.info(f"API: Request to apply proprietary algorithm '{request_data.algorithm_id}' for project '{request_data.project_id}'.")
+
+        if not intel_stack_client:
+            raise HTTPException(status_code=503, detail="Private Intelligence service client not available.")
+
+        # Payload for your private stack's /invoke_proprietary_algorithm endpoint
+        private_api_payload = {
+            "algorithm_id": request_data.algorithm_id,
+            "project_id": request_data.project_id,
+            "context_data": request_data.context_data
+        }
+        private_api_endpoint = "/invoke_proprietary_algorithm" # Matches endpoint on private AlgorithmAgent/MCP
+
+        try:
+            response = await intel_stack_client.post(private_api_endpoint, json=private_api_payload)
+            response.raise_for_status()
+            private_response_data = response.json() # This is ApplyProprietaryAlgorithmResponse structure
+
+            return ApplyAlgorithmResponse(**private_response_data) # Map directly if compatible
+        # ... (robust httpx error handling as in other private API calls) ...
+        except httpx.HTTPStatusError as e_http: # ... (handle error)
+            raise HTTPException(status_code=502, detail=f"Error from Private Algorithm Service: HTTP {e_http.response.status_code}")
+        except Exception as e_call: # ... (handle error)
+            raise HTTPException(status_code=500, detail=f"Internal error calling Private Algorithm Service: {str(e_call)}")
