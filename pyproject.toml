@@ -1,44 +1,86 @@
-# pyproject.toml (root of your project)
+# ===================================
+# 📁 pyproject.toml (Corrected)
+# ===================================
 
 [tool.black]
 line-length = 88
-target-version = ['py311']
-# ... (other black config as previously defined) ...
+target-version = ['py311'] # Match your Python version
+# 'include' defaults to '\.pyi?$' which is usually fine.
 exclude = '''
 /(
-    # ... (existing excludes) ...
-  | .pytest_cache
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | node_modules  # Good to keep if any JS tooling/files ever appear
+  | \.pytest_cache
+  # Add paths to compiled outputs of any non-Python code if relevant
+  # For a pure Python project, these might be less critical but good to have:
+  | apps/.*/dist
+  | agents/.*/dist
 )/
 '''
 
-# Add or uncomment and fill this section
 [tool.pytest.ini_options]
 minversion = "7.0"
-# Add options like "-ra -q --color=yes" for concise output with reasons for skips/xfails
-addopts = "-ra -q --color=yes --strict-markers" 
+# -ra: show extra test summary info for (s)skipped, (X)xfailed, (F)failed, (E)error, (P)passed
+# -q: quiet mode, less verbose
+# --strict-markers: ensure all @pytest.mark markers are registered
+addopts = "-ra -q --color=yes --strict-markers"
 testpaths = [
-    "tests/agent-unit",
-    "tests/integration",
-    # Add paths to tests within apps/ or agents/ if you co-locate tests
-    # e.g., "apps/forgeiq_backend/tests", "agents/PlanAgent/tests"
+    "tests", # Main directory for tests (e.g., tests/unit, tests/integration)
+    # You can also add paths if you co-locate tests with source code:
+    # "apps", # Pytest will then look for test_*.py in apps and its subdirectories
+    # "agents",
+    # "core",
 ]
-python_files = "test_*.py *_test.py tests_*.py"
-python_classes = "Test* Describe*" # For class-based tests or describe-style
-python_functions = "test_*"
-# Configure asyncio mode for pytest-asyncio if you're testing async code
-asyncio_mode = "auto" # or "strict"
-# Optional: Set PYTHONPATH for tests if not handled by CI environment
-# pythonpath = [
-#   ".", # Monorepo root
-#   "apps", 
-#   "agents",
-#   "core",
-#   "interfaces",
-#   "plugins", # if plugins have testable python code
-#   "sdk",     # if sdk has tests
-#   "shared_python" # if you have this
-# ]
-log_cli = True # Show live logging during test runs
-log_cli_level = "INFO"
-log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s (%(filename)s:%(lineno)s)"
+python_files = "test_*.py *_test.py tests_*.py" # Standard test file patterns
+python_classes = "Test* Describe*" # For class-based tests or pytest-describe
+python_functions = "test_*"        # For function-based tests
+
+# Configure asyncio mode for pytest-asyncio (important for your async agents/services)
+# "auto" mode usually works well.
+asyncio_mode = "auto"
+
+# Configure PYTHONPATH for pytest to correctly find your project's modules
+# This ensures imports like 'from core.event_bus import EventBus' work in your tests.
+pythonpath = [
+  ".",        # Adds the monorepo root to Python's path
+  "apps",     # Allows 'from apps.forgeiq_backend_py...' (if your backend is structured so)
+  "agents",   # Allows 'from agents.PlanAgent...'
+  "core",     # Allows 'from core.event_bus...'
+  "interfaces",
+  "plugins",  # If you have Python code in plugins
+  "sdk",      # If you test the SDK or use it in tests
+  "shared"    # If you have the 'shared' Python package for config/logger
+]
+
+# Configure logging display during pytest runs
+log_cli = True
+log_cli_level = "INFO" # Or DEBUG for more verbosity from your app during tests
+log_cli_format = "%(asctime)s [%(levelname)-8s] %(name)-25s: %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# Example for Ruff (optional, modern, fast linter/formatter - can replace black & flake8)
+# [tool.ruff]
+# line-length = 88
+# select = ["E", "F", "W", "I001", "UP", "N", "C4", "B", "A", "RUF"] # Example rule set
+# ignore = ["E501"] # Ignore line too long, as Black handles it
+# target-version = "py311"
+# src = ["."] # Lint files in the current directory and subdirectories
+# exclude = [
+#     ".bzr", ".direnv", ".eggs", ".git", ".hg", ".mypy_cache", ".nox", ".pants.d",
+#     ".ruff_cache", ".svn", ".tox", ".venv", "venv", "__pypackages__", "_build", "buck-out",
+#     "build", "dist", "node_modules",
+#     "*.md", # Example: ignore markdown files
+# ]
+
+# [tool.ruff.isort]
+# known_first_party = ["apps", "agents", "core", "interfaces", "plugins", "sdk", "shared"] # Your top-level packages
