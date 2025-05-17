@@ -1,6 +1,5 @@
-```python
 # =========================================
-# 📁 agents/GovernanceAgent/app/agent.py
+# 📁 agents/GovernanceAgent/agent.py
 # =========================================
 import os
 import json
@@ -8,47 +7,58 @@ import datetime
 import uuid
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, cast # Added cast for TypedDict conversion
 
 # --- Observability Setup ---
 SERVICE_NAME = "GovernanceAgent"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# Basic logging config (OTel LoggingInstrumentor will enhance it)
 logging.basicConfig(
     level=LOG_LEVEL,
     format=f'%(asctime)s - {SERVICE_NAME} - %(name)s - %(levelname)s - %(message)s'
+    # Removed otelTraceID and otelSpanID from basicConfig format string, 
+    # as LoggingInstrumentor handles adding those if OTel is active.
 )
-tracer = None
+_tracer = None 
+_trace_api = None
 try:
-    from opentelemetry import trace
-    from core.observability.tracing import setup_tracing
-    tracer = setup_tracing(SERVICE_NAME)
+    from opentelemetry import trace as otel_trace_api
+    from core.observability.tracing import setup_tracing # Assuming this path is correct via PYTHONPATH
+    _tracer = setup_tracing(SERVICE_NAME) # setup_tracing returns a Tracer instance
+    _trace_api = otel_trace_api # This is the opentelemetry.trace module, for Status etc.
 except ImportError:
+    # This warning is fine, means no tracing if OTel is not installed/configured
     logging.getLogger(SERVICE_NAME).warning(
-        "GovernanceAgent: Tracing setup failed."
+        "GovernanceAgent: OpenTelemetry tracing setup failed or modules not found. Continuing without tracing."
     )
-logger = logging.getLogger(__name__)
+except Exception as e_otel_setup:
+    # Catch any other error during setup_tracing
+    logging.getLogger(SERVICE_NAME).error(
+        f"GovernanceAgent: An error occurred during OpenTelemetry setup: {e_otel_setup}", exc_info=True
+    )
+logger = logging.getLogger(__name__) # Module-specific logger
 # --- End Observability Setup ---
 
+# Project-local imports (ensure __init__.py files and PYTHONPATH allow these)
 from core.event_bus.redis_bus import EventBus, message_summary
 from interfaces.types.events import (
-    AuditLogEntry, SLAMetric, SLAViolationEvent, GovernanceAlertEvent, # New types
-    # Import other event types this agent might specifically audit
-    DagDefinitionCreatedEvent, DagExecutionStatusEvent, TaskStatusUpdateEvent,
-    TestFailedEvent, PatchSuggestedEvent, SecurityScanResultEvent, DeploymentStatusEvent
+    AuditLogEntry, SLAMetric, SLAViolationEvent, GovernanceAlertEvent,
+    DagExecutionStatusEvent, # Example event to check SLA against
+    # Import other specific event TypedDicts that this agent might deeply inspect or handle
+    NewCommitEvent, NewArtifactEvent, SecurityScanResultEvent, TestFailedEvent, PatchSuggestedEvent
 )
 
 # Configuration
-GOVERNANCE_AUDIT_SINK_TYPE = os.getenv("GOVERNANCE_AUDIT_SINK_TYPE", "console_log") # e.g., console_log, s3_audit
-SLA_DEFINITIONS_JSON_STR = os.getenv("SLA_DEFINITIONS_JSON") # e.g., '{ "dag_max_duration_seconds": {"project_alpha": 3600} }'
+GOVERNANCE_AUDIT_SINK_TYPE = os.getenv("GOVERNANCE_AUDIT_SINK_TYPE", "console_log")
+SLA_DEFINITIONS_JSON_STR = os.getenv("SLA_DEFINITIONS_JSON", '{}')
 
-# Event channels this agent listens to - broad subscription
-AUDITABLE_EVENT_PATTERNS = [
-    "events.project.*", # Catches most project-specific operational events
-    "events.system.*",  # For system-level events
-    "events.agent.*.lifecycle", # Agent startup/shutdown etc.
-    # Add more specific patterns if needed
-]
-GOVERNANCE_ALERT_CHANNEL = "events.system.governance.alerts"
+AUDITABLE_EVENT_PATTERNS_STR = os.getenv(
+    "GOVERNANCE_AUDIT_PATTERNS", 
+    "events.project.*,events.system.*,events.agent.*.lifecycle"
+)
+AUDITABLE_EVENT_PATTERNS = [p.strip() for p in AUDITABLE_EVENT_PATTERNS_STR.split(',') if p.strip()]
+
+GOVERNANCE_ALERTS_CHANNEL = "events.system.governance.alerts"
 
 
 class GovernanceAgent:
@@ -56,210 +66,228 @@ class GovernanceAgent:
         logger.info("Initializing GovernanceAgent...")
         self.event_bus = EventBus()
         self.sla_definitions: Dict[str, Any] = {}
-        if SLA_DEFINITIONS_JSON_STR:
-            try:
+        try:
+            if SLA_DEFINITIONS_JSON_STR:
                 self.sla_definitions = json.loads(SLA_DEFINITIONS_JSON_STR)
-                logger.info(f"Loaded SLA definitions: {self.sla_definitions}")
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse SLA_DEFINITIONS_JSON: {SLA_DEFINITIONS_JSON_STR}")
+            logger.info(f"Loaded {len(self.sla_definitions.keys())} SLA definition group(s).")
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse SLA_DEFINITIONS_JSON: '{SLA_DEFINITIONS_JSON_STR}'. No SLAs will be actively monitored from this config.")
         
         if not self.event_bus.redis_client:
-            logger.error("GovernanceAgent critical: EventBus not connected.")
-        logger.info(f"GovernanceAgent Initialized. Audit Sink: {GOVERNANCE_AUDIT_SINK_TYPE}")
+            logger.error("GovernanceAgent critical: EventBus not connected. Event processing will fail.")
+        logger.info(f"GovernanceAgent Initialized. Audit Sink: {GOVERNANCE_AUDIT_SINK_TYPE}, Listening to: {AUDITABLE_EVENT_PATTERNS}")
 
-    @property
-    def tracer_instance(self):
-        return tracer
+    def _start_trace_span_if_available(self, operation_name: str, parent_context: Optional[Any] = None, **attrs):
+        if _tracer and _trace_api:
+            span = _tracer.start_span(f"governance_agent.{operation_name}", context=parent_context)
+            for k, v in attrs.items():
+                span.set_attribute(k, v)
+            return span
+        
+        class NoOpSpan: # Fallback if no tracer
+            def __enter__(self): return self
+            def __exit__(self, exc_type, exc_val, exc_tb): pass
+            def set_attribute(self, key, value): pass
+            def record_exception(self, exception, attributes=None): pass
+            def set_status(self, status): pass
+            def end(self): pass
+        return NoOpSpan()
 
-    def _create_audit_log(self, original_event: Dict[str, Any], received_channel: str) -> AuditLogEntry:
-        """Creates a standardized audit log entry from an incoming event."""
-        # Sanitize and select key details from the original event for the audit log
-        details_to_log = {
-            k: v for k, v in original_event.items() 
-            if k not in ["event_type", "timestamp"] and isinstance(v, (str, int, float, bool, list, dict))
-        }
-        # Potentially truncate large fields in details_to_log
-        for k, v in details_to_log.items():
-            if isinstance(v, str) and len(v) > 256:
-                details_to_log[k] = v[:253] + "..."
-            elif isinstance(v, list) and len(v) > 10:
-                 details_to_log[k] = [str(item)[:100] for item in v[:10]] + ["... (truncated)"]
+    def _create_audit_log_entry(self, original_event: Dict[str, Any], received_channel: str) -> AuditLogEntry:
+        source_event_type = original_event.get("event_type", "UnknownSourceEvent")
+        details_to_log = {}
+        for k, v in original_event.items():
+            if k not in ["event_type", "timestamp"] and isinstance(v, (str, int, float, bool, list, dict)):
+                if isinstance(v, str) and len(v) > 500:
+                    details_to_log[k] = v[:497] + "..."
+                elif isinstance(v, list) and len(v) > 20:
+                    details_to_log[k] = [str(item_elem)[:100] for item_elem in v[:20]] + ["... (list truncated)"]
+                elif isinstance(v, dict) and len(json.dumps(v)) > 1024: # Check serialized size for dicts
+                    details_to_log[k] = {"summary": "dict_truncated_due_to_size", "keys": list(v.keys())[:10]}
+                else:
+                    details_to_log[k] = v
+        
+        # Attempt to get a more specific ID from the event
+        source_id_fields = ["event_id", "request_id", "dag_id", "deployment_id", "audit_id"]
+        source_event_id = next((original_event.get(field) for field in source_id_fields if original_event.get(field)), None)
 
 
         return AuditLogEntry(
-            event_type="AuditEvent", # This is the type of event this agent *creates*
+            event_type="AuditEvent",
             audit_id=str(uuid.uuid4()),
             timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
-            source_event_type=original_event.get("event_type", "UnknownSourceEvent"),
-            source_event_id=original_event.get("event_id") or original_event.get("request_id") or original_event.get("dag_id"),
-            service_name=original_event.get("service_name"), # If original event has it
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            service_name=original_event.get("service_name"), 
             project_id=original_event.get("project_id"),
             commit_sha=original_event.get("commit_sha"),
-            user_or_actor=original_event.get("triggered_by") or original_event.get("author"),
-            action_taken=f"Event '{original_event.get('event_type', 'Unknown')}' occurred on channel '{received_channel}'",
-            details=details_to_log,
-            policy_check_results=None # Placeholder for future policy checks
+            user_or_actor=original_event.get("triggered_by") or original_event.get("requested_by") or original_event.get("author"),
+            action_description=f"Event '{source_event_type}' observed on channel '{received_channel}'.",
+            event_details=details_to_log,
+            policy_check_results=self._perform_policy_checks(original_event), # Returns Optional[Dict[str,str]]
+            severity=original_event.get("severity", "INFO") if source_event_type != "AuditEvent" else "INFO" # Audit severity
         )
 
-    async def persist_audit_log(self, audit_entry: AuditLogEntry):
-        """Persists the audit log. For V0.1, logs to console. Future: S3, Database."""
-        log_payload_str = json.dumps(audit_entry) # For structured logging
-        logger.info(f"AUDIT_LOG: {log_payload_str}") # This makes it easy to filter in log management
+    async def _persist_audit_log(self, audit_entry: AuditLogEntry):
+        log_payload_str = json.dumps(audit_entry) # Ensure it's serializable
+        logger.info(f"GOVERNANCE_AUDIT_LOG: {log_payload_str}") 
 
-        if GOVERNANCE_AUDIT_SINK_TYPE == "s3_audit_placeholder": # Conceptual
-            # Placeholder for S3 logic
-            # s3_key = f"audit_logs/{audit_entry['timestamp_date']}/{audit_entry['audit_id']}.json"
-            # logger.info(f"S3_AUDIT_PLACEHOLDER: Would write to S3 path: {s3_key}")
-            pass
-    
-    def _check_slas(self, event_data: Dict[str, Any]):
-        """Placeholder for basic SLA checking based on event data."""
+        if GOVERNANCE_AUDIT_SINK_TYPE == "s3_audit_placeholder":
+            # Placeholder for S3 logic, ensure project_id and source_event_type are filesystem-safe
+            project_id_path = "".join(c if c.isalnum() or c in ['-', '_'] else '_' for c in audit_entry.get("project_id", "system"))
+            event_type_path = "".join(c if c.isalnum() or c in ['-', '_'] else '_' for c in audit_entry['source_event_type'])
+            ts_obj = datetime.datetime.fromisoformat(audit_entry["timestamp"].replace("Z","+00:00"))
+            date_path = ts_obj.strftime('%Y/%m/%d')
+            s3_key = f"audit_trail/{project_id_path}/{event_type_path}/{date_path}/{audit_entry['audit_id']}.json"
+            logger.debug(f"S3_AUDIT_PLACEHOLDER: Would write to S3 key: {s3_key}")
+        await asyncio.sleep(0.001)
+
+    def _perform_policy_checks(self, event_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        # For V0.1, this is a placeholder. Real checks would be implemented here.
+        # Example structure for results: {"policy_name": "status (passed/failed/advisory)"}
+        # results: Dict[str,str] = {} 
+        # if event_data.get("event_type") == "SomeCriticalEvent":
+        #     if "some_bad_pattern" in str(event_data):
+        #         results["bad_pattern_check"] = "failed"
+        #         self._publish_governance_alert("BadPatternDetected", "HIGH", "A bad pattern was detected.", event_data)
+        return None # No checks implemented in V0.1
+
+    def _check_slas_on_event(self, event_data: Dict[str, Any]):
         event_type = event_data.get("event_type")
         project_id = event_data.get("project_id")
 
-        if event_type == "DagExecutionStatusEvent" and event_data.get("status", "").startswith("COMPLETED"):
-            dag_id = event_data["dag_id"]
-            started_at_str = event_data.get("started_at")
-            completed_at_str = event_data.get("completed_at")
-            
-            if started_at_str and completed_at_str:
-                try:
-                    started = datetime.datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
-                    completed = datetime.datetime.fromisoformat(completed_at_str.replace("Z", "+00:00"))
-                    duration_seconds = (completed - started).total_seconds()
-                    
-                    logger.debug(f"DAG {dag_id} for project {project_id} duration: {duration_seconds}s")
-                    
-                    # Example SLA check
-                    sla_config = self.sla_definitions.get("dag_max_duration_seconds", {})
-                    project_sla_duration = sla_config.get(project_id, sla_config.get("default", 7200)) # Default 2hrs
+        if event_type == "DagExecutionStatusEvent":
+            dag_status_event = cast(DagExecutionStatusEvent, event_data) # Use cast for type checker
+            if dag_status_event.get("status", "").startswith("COMPLETED"):
+                dag_id = dag_status_event.get("dag_id", "unknown_dag")
+                started_at_str = dag_status_event.get("started_at")
+                completed_at_str = dag_status_event.get("completed_at")
+                
+                if started_at_str and completed_at_str:
+                    try:
+                        started = datetime.datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+                        completed = datetime.datetime.fromisoformat(completed_at_str.replace("Z", "+00:00"))
+                        duration_seconds = (completed - started).total_seconds()
+                        
+                        logger.debug(f"DAG {dag_id} (Project: {project_id}) duration: {duration_seconds:.2f}s for SLA check.")
+                        
+                        sla_group = self.sla_definitions.get("dag_max_duration_seconds", {})
+                        project_sla_duration_str = sla_group.get(project_id, sla_group.get("default")) if project_id else sla_group.get("default")
 
-                    if duration_seconds > project_sla_duration:
-                        violation_details = (
-                            f"DAG '{dag_id}' in project '{project_id}' exceeded SLA. "
-                            f"Duration: {duration_seconds:.2f}s, Threshold: {project_sla_duration}s."
-                        )
-                        logger.warning(violation_details)
-                        self._publish_sla_violation(
-                            sla_name="dag_execution_time_sla",
-                            metric_name="dag_execution_duration",
-                            observed_value=duration_seconds,
-                            threshold_value=float(project_sla_duration),
-                            project_id=project_id,
-                            details=violation_details
-                        )
-                except ValueError:
-                    logger.error(f"Could not parse timestamps for DAG {dag_id} to check SLA.")
-        # Add more SLA checks for other event types or metrics
-    
+                        if project_sla_duration_str:
+                            threshold = float(project_sla_duration_str)
+                            if duration_seconds > threshold:
+                                violation_details = (f"DAG '{dag_id}' in project '{project_id or 'N/A'}' exceeded SLA. "
+                                                     f"Duration: {duration_seconds:.2f}s, Threshold: {threshold}s.")
+                                self._publish_sla_violation(
+                                    sla_name="dag_execution_time_limit", metric_name="dag_execution_duration_seconds",
+                                    observed_value=duration_seconds, threshold_value=threshold,
+                                    project_id=project_id, entity_id=dag_id, details=violation_details
+                                )
+                    except ValueError:
+                        logger.error(f"Could not parse timestamps for DAG '{dag_id}' to check SLA.", exc_info=True)
+
     def _publish_sla_violation(self, sla_name: str, metric_name: str, observed_value: float, 
-                               threshold_value: float, project_id: Optional[str], details: str):
+                               threshold_value: float, project_id: Optional[str], entity_id: Optional[str], details: str):
         if self.event_bus.redis_client:
-            alert_event = SLAViolationEvent(
-                event_type="SLAViolationEvent",
-                alert_id=str(uuid.uuid4()),
+            alert_id = str(uuid.uuid4())
+            sla_event = SLAViolationEvent(
+                event_type="SLAViolationEvent", alert_id=alert_id,
                 timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
-                sla_name=sla_name,
-                metric_name=metric_name,
-                observed_value=observed_value,
-                threshold_value=threshold_value,
-                project_id=project_id,
-                details=details
+                sla_name=sla_name, metric_name=metric_name,
+                observed_value=observed_value, threshold_value=threshold_value,
+                project_id=project_id, entity_id=entity_id, details=details
             )
-            self.event_bus.publish(GOVERNANCE_ALERT_CHANNEL, alert_event)
-            logger.warning(f"Published SLAViolationEvent: {details}")
+            self.event_bus.publish(GOVERNANCE_ALERTS_CHANNEL, sla_event)
+            logger.warning(f"Published SLAViolationEvent ({alert_id}): {details}")
 
+    def _publish_governance_alert(self, alert_type: str, severity: str, description: str, context_summary: Dict[str, Any]):
+        if self.event_bus.redis_client:
+            alert_id = str(uuid.uuid4())
+            # Ensure context_summary is clean for JSON
+            clean_context = {k: (str(v)[:200] if isinstance(v, (str, list, dict)) else v) for k,v in context_summary.items()}
+            alert_event = GovernanceAlertEvent(
+                event_type="GovernanceAlertEvent", alert_id=alert_id,
+                timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
+                alert_type=alert_type, severity=severity, description=description,
+                context_summary=clean_context, recommendation="Further review required."
+            )
+            self.event_bus.publish(GOVERNANCE_ALERTS_CHANNEL, alert_event)
+            logger.warning(f"Published GovernanceAlertEvent ({alert_id}) of type '{alert_type}': {description}")
 
-    async def handle_generic_event(self, channel: str, event_data_str: str):
-        span_name = "governance_agent.handle_generic_event"
-        parent_context = None 
-        
-        if not self.tracer_instance: # Fallback
-            await self._handle_generic_event_logic(channel, event_data_str)
-            return
-
-        with self.tracer_instance.start_as_current_span(span_name, context=parent_context) as span:
-            span.set_attributes({
-                "messaging.system": "redis",
-                "messaging.destination.name": channel, # Actual channel from pmessage
-                "messaging.operation": "process"
-            })
-            try:
-                await self._handle_generic_event_logic(channel, event_data_str)
-            except Exception as e: # Catchall
-                logger.error(f"Unhandled error in _handle_generic_event_logic from channel {channel}: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, "Generic event handling logic failed"))
-
-    async def _handle_generic_event_logic(self, channel: str, event_data_str: str):
-        logger.debug(f"GovernanceAgent processing event from channel '{channel}': {message_summary(event_data_str)}")
+    async def handle_event_for_governance(self, channel: str, event_data_str: str, parent_span_context: Optional[Any] = None):
+        span = self._start_trace_span_if_available("handle_event", parent_context=parent_span_context, event_channel=channel)
         try:
-            event_data = json.loads(event_data_str)
-            event_type = event_data.get("event_type", "UnknownEvent")
+            with span: # type: ignore
+                logger.debug(f"GovernanceAgent processing event from channel '{channel}': {message_summary(event_data_str)}")
+                event_data = json.loads(event_data_str)
+                event_type = event_data.get("event_type", "UnknownEvent")
 
-            if self.tracer_instance:
-                trace.get_current_span().set_attribute("event.type", event_type)
-                trace.get_current_span().set_attribute("event.project_id", event_data.get("project_id"))
+                if _tracer: span.set_attribute("event.type", event_type); span.set_attribute("event.project_id", event_data.get("project_id"))
 
-            # 1. Create and persist audit log
-            audit_entry = self._create_audit_log(event_data, channel)
-            await self.persist_audit_log(audit_entry) # Make async if persist_audit_log does I/O
-
-            # 2. Perform SLA checks (basic example)
-            self._check_slas(event_data)
-
-            # 3. Placeholder for policy/ethics checks
-            # if event_type == "DagDefinitionCreatedEvent":
-            #    self._check_dag_against_policies(event_data.get("dag"))
-            # elif event_type == "PatchSuggestedEvent":
-            #    self._check_patch_ethics(event_data.get("suggestions"))
-            
-            logger.debug(f"Finished processing event '{event_type}' for governance.")
-
+                audit_entry = self._create_audit_log_entry(event_data, channel)
+                await self._persist_audit_log(audit_entry)
+                self._check_slas_on_event(event_data)
+                # _perform_policy_checks is called within _create_audit_log_entry
+                
+                logger.debug(f"Finished governance processing for event '{event_type}' on channel '{channel}'.")
+                if _tracer and _trace_api: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
         except json.JSONDecodeError:
-            logger.error(f"Could not decode JSON for audit/SLA from channel '{channel}': {message_summary(event_data_str)}")
-            if self.tracer_instance: trace.get_current_span().set_status(trace.Status(trace.StatusCode.ERROR, "JSONDecodeError in governance handling"))
+            logger.error(f"GovAgent: Could not decode JSON from '{channel}': {message_summary(event_data_str)}")
+            if _tracer and _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "JSONDecodeError"))
         except Exception as e:
-            logger.error(f"Error processing event for governance from channel '{channel}': {e}", exc_info=True)
-            if self.tracer_instance:
-                trace.get_current_span().record_exception(e)
-                trace.get_current_span().set_status(trace.Status(trace.StatusCode.ERROR, "Governance event processing failed"))
+            logger.error(f"GovAgent: Error processing event from '{channel}': {e}", exc_info=True)
+            if _tracer and _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Event processing failed"))
 
     async def main_event_loop(self):
-        if not self.event_bus.redis_client:
-            logger.critical("GovernanceAgent: EventBus not connected. Worker cannot start.")
+        if not self.event_bus.redis_client or not AUDITABLE_EVENT_PATTERNS:
+            logger.critical("GovernanceAgent: EventBus not connected or no audit patterns. Worker cannot start.")
             await asyncio.sleep(60)
             return
 
-        pubsub = self.event_bus.redis_client.pubsub()
-        subscribed_ok = False
+        pubsub = self.event_bus.redis_client.pubsub() # type: ignore # Corrected: self.event_bus.redis_client is already the client
+        all_patterns_subscribed = True
         try:
             for pattern in AUDITABLE_EVENT_PATTERNS:
-                await asyncio.to_thread(pubsub.psubscribe, pattern)
+                await asyncio.to_thread(pubsub.psubscribe, pattern) # type: ignore
                 logger.info(f"GovernanceAgent subscribed to pattern '{pattern}'")
-            subscribed_ok = True
-        except redis.exceptions.RedisError as e:
+        except redis.exceptions.RedisError as e: # type: ignore
             logger.critical(f"GovernanceAgent: Failed to psubscribe: {e}. Worker cannot start.")
-            return
+            all_patterns_subscribed = False
         
-        if not subscribed_ok:
+        if not all_patterns_subscribed:
              logger.critical("GovernanceAgent: No subscriptions successful. Worker exiting.")
+             if pubsub: await asyncio.to_thread(pubsub.close) # type: ignore
              return
 
-        logger.info(f"GovernanceAgent worker started, listening for auditable events...")
+        logger.info(f"GovernanceAgent worker started, listening for auditable events.")
         try:
             while True:
-                message = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0)
+                message = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0) # type: ignore
                 if message and message["type"] == "pmessage":
-                    # Start a new trace for each message
-                    span_name = "governance_agent.process_auditable_event_from_bus"
-                    if not self.tracer_instance:
-                         await self.handle_generic_event(message["channel"], message["data"])
+                    # For pmessage, message['channel'] is the pattern, message['data'] is the actual channel
+                    # No, for pmessage, message['channel'] is the pattern, message['data'] is the message content.
+                    # message['pattern'] is the pattern that matched. message['channel'] is actual channel event came on.
+                    actual_channel = message.get('channel')
+                    if isinstance(actual_channel, bytes): actual_channel = actual_channel.decode('utf-8')
+                    event_content = message.get('data')
+                    if isinstance(event_content, bytes): event_content = event_content.decode('utf-8')
+                    
+                    if actual_channel and event_content:
+                         span_name = "governance_agent.process_bus_event"
+                         # For simplicity, not propagating trace context from Redis message itself in V0.1
+                         # A more advanced setup might inject/extract W3C TraceContext into/from message payload.
+                         parent_context_from_event = None 
+                         if not self.tracer_instance:
+                             await self.handle_event_for_governance(actual_channel, event_content)
+                         else:
+                            with self.tracer_instance.start_as_current_span(span_name, context=parent_context_from_event) as span:
+                                span.set_attribute("messaging.source.channel", actual_channel)
+                                await self.handle_event_for_governance(actual_channel, event_content, parent_span_context=None) # span is current context
                     else:
-                        with self.tracer_instance.start_as_current_span(span_name) as span:
-                            span.set_attribute("messaging.source.channel", message.get("channel"))
-                            await self.handle_generic_event(message["channel"], message["data"])
-                await asyncio.sleep(0.01)
+                        logger.warning(f"Received pmessage with no channel or data: {message}")
+
+                await asyncio.sleep(0.01) 
         except KeyboardInterrupt:
             logger.info("GovernanceAgent event loop interrupted.")
         except Exception as e:
@@ -269,8 +297,8 @@ class GovernanceAgent:
             if pubsub:
                 try: 
                     for pattern in AUDITABLE_EVENT_PATTERNS:
-                       await asyncio.to_thread(pubsub.punsubscribe, pattern)
-                    await asyncio.to_thread(pubsub.close)
+                        if pattern.strip(): await asyncio.to_thread(pubsub.punsubscribe, pattern.strip()) # type: ignore
+                    await asyncio.to_thread(pubsub.close) # type: ignore
                 except Exception as e_close:
                      logger.error(f"Error closing pubsub for GovernanceAgent: {e_close}")
             logger.info("GovernanceAgent shutdown complete.")
@@ -286,4 +314,3 @@ if __name__ == "__main__":
         logger.info("GovernanceAgent main execution stopped by user.")
     except Exception as e:
         logger.critical(f"GovernanceAgent failed to start or unhandled error in __main__: {e}", exc_info=True)
-```
