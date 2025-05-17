@@ -1,0 +1,10 @@
+# Ensure your virtual environment is active and requirements installed
+# Set PYTHONPATH if your venv doesn't automatically include the monorepo root
+export PYTHONPATH=$(pwd):$PYTHONPATH 
+
+python scripts/bootstrap.py
+
+# For seeder (ensure Weaviate is running and accessible)
+export WEAVIATE_URL="http://<your_weaviate_host>:<port>"
+# export EMBEDDING_MODEL_NAME="your_chosen_model" # Optional
+python scripts/seed-embeddings.py <your_project_id> <path_to_code_to_index>
