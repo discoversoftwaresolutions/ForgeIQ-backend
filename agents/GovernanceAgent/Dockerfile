@@ -1,9 +1,11 @@
-# agents/GovernanceAgent/Dockerfile
+
 FROM python:3.11-slim
 
 WORKDIR /app
 ENV PYTHONPATH=/app
-# No special apt-get dependencies needed for this agent currently
+ENV PYTHONUNBUFFERED=1
+
+# No special apt-get dependencies anticipated for this agent's V0.1
 
 COPY . /app
 
