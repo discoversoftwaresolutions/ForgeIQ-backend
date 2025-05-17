@@ -1,0 +1,44 @@
+# pyproject.toml (root of your project)
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+# ... (other black config as previously defined) ...
+exclude = '''
+/(
+    # ... (existing excludes) ...
+  | .pytest_cache
+)/
+'''
+
+# Add or uncomment and fill this section
+[tool.pytest.ini_options]
+minversion = "7.0"
+# Add options like "-ra -q --color=yes" for concise output with reasons for skips/xfails
+addopts = "-ra -q --color=yes --strict-markers" 
+testpaths = [
+    "tests/agent-unit",
+    "tests/integration",
+    # Add paths to tests within apps/ or agents/ if you co-locate tests
+    # e.g., "apps/forgeiq_backend/tests", "agents/PlanAgent/tests"
+]
+python_files = "test_*.py *_test.py tests_*.py"
+python_classes = "Test* Describe*" # For class-based tests or describe-style
+python_functions = "test_*"
+# Configure asyncio mode for pytest-asyncio if you're testing async code
+asyncio_mode = "auto" # or "strict"
+# Optional: Set PYTHONPATH for tests if not handled by CI environment
+# pythonpath = [
+#   ".", # Monorepo root
+#   "apps", 
+#   "agents",
+#   "core",
+#   "interfaces",
+#   "plugins", # if plugins have testable python code
+#   "sdk",     # if sdk has tests
+#   "shared_python" # if you have this
+# ]
+log_cli = True # Show live logging during test runs
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
