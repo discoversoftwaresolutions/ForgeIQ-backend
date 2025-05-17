@@ -101,3 +101,28 @@ class SDKMCPStrategyResponse(TypedDict):
     status: str # e.g., "strategy_provided", "no_optimization_needed", "error"
     message: Optional[str]
     mcp_execution_details: Optional[Dict[str, Any]] # For any metadata from MCP
+# =======================================================================
+# 📁 apps/forgeiq-backend/app/api_models.py (additions for MCP interaction)
+# =======================================================================
+# ... (existing Pydantic models like PipelineGenerateRequest, etc.) ...
+
+class MCPStrategyApiRequest(BaseModel):
+    # This is what the backend API endpoint will expect in its request body
+    # It should correspond to what the SDK's SDKMCPStrategyRequestContext provides
+    current_dag_snapshot: Optional[List[Dict[str, Any]]] = Field(default=None, description="Snapshot of the current DAG, e.g., list of nodes or simplified structure.")
+    optimization_goal: Optional[str] = Field(default=None, description="Specific goal for the MCP strategy, e.g., 'reduce_cost'.")
+    additional_mcp_context: Optional[Dict[str, Any]] = Field(default=None, description="Any other context for the MCP.")
+
+class MCPStrategyApiDetails(BaseModel): # Part of the response
+    strategy_id: Optional[str] = None
+    # new_dag_definition: Optional[SDKDagDefinitionModel] = None # If returning a full DAG
+    new_dag_definition_raw: Optional[Dict[str, Any]] = Field(default=None, description="Raw new DAG definition or modifications from MCP.")
+    directives: Optional[List[str]] = None
+    mcp_metadata: Optional[Dict[str, Any]] = Field(default=None, alias="mcpExecutionDetails")
+
+
+class MCPStrategyApiResponse(BaseModel):
+    project_id: str
+    status: str # e.g., "STRATEGY_SUGGESTED", "NO_ACTION_NEEDED", "MCP_ERROR"
+    message: Optional[str] = None
+    strategy_details: Optional[MCPStrategyApiDetails] = None
