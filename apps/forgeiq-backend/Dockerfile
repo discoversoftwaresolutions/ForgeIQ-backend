@@ -52,4 +52,4 @@ EXPOSE 8000
 #   - Find the 'app' instance (your FastAPI app) in the Python module 'apps.forgeiq-backend.app.main'.
 #   - Listen on all available network interfaces within the container (0.0.0.0).
 #   - Listen on port 8000 inside the container.
-CMD ["uvicorn", "apps.forgeiq-backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "apps.forgeiq-backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
