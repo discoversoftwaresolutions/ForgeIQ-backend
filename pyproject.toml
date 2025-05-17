@@ -1,5 +1,5 @@
 # ===================================
-# 📁 pyproject.toml (Corrected)
+# 📁 pyproject.toml (Corrected V0.3)
 # ===================================
 
 [tool.black]
@@ -19,7 +19,7 @@ exclude = '''
   | buck-out
   | build
   | dist
-  | node_modules  # Good to keep if any JS tooling/files ever appear
+  | node_modules
   | \.pytest_cache
   # Add paths to compiled outputs of any non-Python code if relevant
   # For a pure Python project, these might be less critical but good to have:
@@ -37,7 +37,7 @@ addopts = "-ra -q --color=yes --strict-markers"
 testpaths = [
     "tests", # Main directory for tests (e.g., tests/unit, tests/integration)
     # You can also add paths if you co-locate tests with source code:
-    # "apps", # Pytest will then look for test_*.py in apps and its subdirectories
+    # "apps",
     # "agents",
     # "core",
 ]
@@ -46,26 +46,24 @@ python_classes = "Test* Describe*" # For class-based tests or pytest-describe
 python_functions = "test_*"        # For function-based tests
 
 # Configure asyncio mode for pytest-asyncio (important for your async agents/services)
-# "auto" mode usually works well.
 asyncio_mode = "auto"
 
 # Configure PYTHONPATH for pytest to correctly find your project's modules
-# This ensures imports like 'from core.event_bus import EventBus' work in your tests.
 pythonpath = [
   ".",        # Adds the monorepo root to Python's path
-  "apps",     # Allows 'from apps.forgeiq_backend_py...' (if your backend is structured so)
-  "agents",   # Allows 'from agents.PlanAgent...'
-  "core",     # Allows 'from core.event_bus...'
+  "apps",     
+  "agents",   
+  "core",     
   "interfaces",
   "plugins",  # If you have Python code in plugins
-  "sdk",      # If you test the SDK or use it in tests
-  "shared"    # If you have the 'shared' Python package for config/logger
+  "sdk",      
+  "shared"    
 ]
 
 # Configure logging display during pytest runs
-log_cli = True
-log_cli_level = "INFO" # Or DEBUG for more verbosity from your app during tests
-log_cli_format = "%(asctime)s [%(levelname)-8s] %(name)-25s: %(message)s (%(filename)s:%(lineno)s)"
+log_cli = true # <<< CORRECTED TOML BOOLEAN (was True)
+log_cli_level = "INFO" 
+log_cli_format = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
 # Example for Ruff (optional, modern, fast linter/formatter - can replace black & flake8)
@@ -74,13 +72,13 @@ log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 # select = ["E", "F", "W", "I001", "UP", "N", "C4", "B", "A", "RUF"] # Example rule set
 # ignore = ["E501"] # Ignore line too long, as Black handles it
 # target-version = "py311"
-# src = ["."] # Lint files in the current directory and subdirectories
+# src = ["."] 
 # exclude = [
 #     ".bzr", ".direnv", ".eggs", ".git", ".hg", ".mypy_cache", ".nox", ".pants.d",
 #     ".ruff_cache", ".svn", ".tox", ".venv", "venv", "__pypackages__", "_build", "buck-out",
 #     "build", "dist", "node_modules",
-#     "*.md", # Example: ignore markdown files
+#     "*.md", 
 # ]
 
 # [tool.ruff.isort]
-# known_first_party = ["apps", "agents", "core", "interfaces", "plugins", "sdk", "shared"] # Your top-level packages
+# known_first_party = ["apps", "agents", "core", "interfaces", "plugins", "sdk", "shared"]
