@@ -1,0 +1,5 @@
+@property
+    def build_system(self) -> BuildSystemClient:
+        if self._build_system_client is None:
+            self._build_system_client = BuildSystemClient(self) # Pass self
+        return self._build_system_client
