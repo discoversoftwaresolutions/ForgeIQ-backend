@@ -30,3 +30,10 @@ __all__ = [
     "CacheKeyParams", "CachedItemMetadata", # <<< NEW
     "CacheGetResponse", "CacheStoreRequest", "CacheStoreResponse" # <<< NEW
 ]
+# interfaces/types/__init__.py
+# ... (all existing imports and __all__ entries) ...
+from .orchestration import OrchestrationFlowState
+
+__all__.extend([
+    "OrchestrationFlowState",
+])
