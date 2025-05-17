@@ -1,279 +1,273 @@
-# =======================================
-# 📁 agents/DependencyAgent//agent.py
-# =======================================
+# =======================================================
+# 📁 agents/DependencyAgent/app/agent.py (V0.2 - CABGP)
+# =======================================================
 import os
 import json
 import datetime
 import uuid
 import asyncio
 import logging
-from collections import defaultdict # Was missing from previous if used by PlanAgent for adj list
-from typing import Dict, Any, Optional, List 
+from typing import Dict, Any, Optional, List
 
-# --- Observability Setup ---
+# --- Observability Setup (as before) ---
 SERVICE_NAME = "DependencyAgent"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format=f'%(asctime)s - {SERVICE_NAME} - %(name)s - %(levelname)s - %(message)s'
-)
-tracer = None
+logging.basicConfig(level=LOG_LEVEL, format=f'%(asctime)s - {SERVICE_NAME} - %(name)s - %(levelname)s - %(message)s')
+_tracer = None; _trace_api = None
 try:
-    # Assuming core.observability.tracing is in PYTHONPATH
+    from opentelemetry import trace as otel_trace_api
     from core.observability.tracing import setup_tracing
-    tracer = setup_tracing(SERVICE_NAME)
-except ImportError:
-    logging.getLogger(SERVICE_NAME).warning(
-        "DependencyAgent: Tracing setup failed. Ensure core.observability.tracing is available and PYTHONPATH is correct."
-    )
+    _tracer = setup_tracing(SERVICE_NAME)
+    _trace_api = otel_trace_api
+except ImportError: logging.getLogger(SERVICE_NAME).warning("DependencyAgent: Tracing setup failed.")
 logger = logging.getLogger(__name__)
 # --- End Observability Setup ---
 
 from core.event_bus.redis_bus import EventBus, message_summary
-# Import from your core.build_graph module
-from core.build_graph import detect_changed_tasks, get_project_dag 
+from core.build_graph import detect_changed_tasks as core_detect_changed_tasks, get_project_dag as core_get_project_dag
 from interfaces.types.events import NewCommitEvent, AffectedTasksIdentifiedEvent, FileChange
 
-COMMIT_EVENT_CHANNEL_PATTERN = "events.project.*.new_commit" # Listen for new commits
+# SDK for calling ForgeIQ-backend to access proprietary algorithms
+try:
+    from sdk.client import ForgeIQClient
+    from sdk.exceptions import ForgeIQSDKError
+    # from sdk.models import SDKAlgorithmContext # If needed for precise typing for SDK call
+except ImportError:
+    logger.error("DependencyAgent: ForgeIQ SDK not found. Proprietary algorithm integration will fail.")
+    ForgeIQClient = None # type: ignore
+    ForgeIQSDKError = Exception # type: ignore
+
+
+# Configuration for using proprietary CABGP
+USE_PROPRIETARY_CABGP = os.getenv("USE_PROPRIETARY_CABGP", "false").lower() == "true"
+CABGP_ALGORITHM_ID = "CABGP" # The ID registered for this algorithm
+
+COMMIT_EVENT_CHANNEL_PATTERN = "events.project.*.new_commit"
 AFFECTED_TASKS_EVENT_CHANNEL_TEMPLATE = "events.project.{project_id}.affected_tasks.identified"
 
 class DependencyAgent:
     def __init__(self):
-        logger.info("Initializing DependencyAgent...")
+        logger.info(f"Initializing DependencyAgent (V0.2 - CABGP Integration: {USE_PROPRIETARY_CABGP})...")
         self.event_bus = EventBus()
+        self.sdk_client: Optional[ForgeIQClient] = None
+
+        if USE_PROPRIETARY_CABGP:
+            if ForgeIQClient:
+                api_base_url = os.getenv("FORGEIQ_API_BASE_URL")
+                api_key = os.getenv("FORGEIQ_API_KEY")
+                if api_base_url:
+                    try:
+                        self.sdk_client = ForgeIQClient(base_url=api_base_url, api_key=api_key)
+                        logger.info("DependencyAgent: ForgeIQ SDK client initialized for CABGP.")
+                    except Exception as e_sdk:
+                        logger.error(f"DependencyAgent: Failed to init ForgeIQ SDK client: {e_sdk}", exc_info=True)
+                        self.sdk_client = None # Ensure it's None on failure
+                else:
+                    logger.error("DependencyAgent: USE_PROPRIETARY_CABGP is true, but FORGEIQ_API_BASE_URL is not set. CABGP calls will fail.")
+            else:
+                logger.error("DependencyAgent: USE_PROPRIETARY_CABGP is true, but ForgeIQClient SDK could not be imported.")
+
         if not self.event_bus.redis_client:
             logger.error("DependencyAgent critical: EventBus not connected.")
-        logger.info("DependencyAgent Initialized.")
+        logger.info("DependencyAgent V0.2 Initialized.")
 
     @property
-    def tracer(self): # For OpenTelemetry
-        return tracer
+    def tracer_instance(self): return _tracer
+    def _start_trace_span_if_available(self, operation_name: str, parent_context: Optional[Any] = None, **attrs):
+        # ... (same helper as before) ...
+        if self.tracer_instance and _trace_api:
+            span = self.tracer_instance.start_span(f"dependency_agent.{operation_name}", context=parent_context)
+            for k, v in attrs.items(): span.set_attribute(k, v)
+            return span
+        class NoOpSpan:
+            def __enter__(self): return self; 
+            def __exit__(self,tp,vl,tb): pass; 
+            def set_attribute(self,k,v): pass; 
+            def record_exception(self,e,attributes=None): pass; 
+            def set_status(self,s): pass;
+            def end(self): pass
+        return NoOpSpan()
 
-    def _determine_affected_tasks(self, project_id: str, changed_files_paths: List[str]) -> List[str]:
-        """
-        Uses the core.build_graph logic to determine affected tasks.
-        """
-        current_span_context = None
-        if self.tracer:
-            current_span = trace.get_current_span() # Get current span from context
-            current_span_context = trace.set_span_in_context(current_span)
+    async def _determine_affected_tasks_with_cabgp(self, project_id: str, changed_files_paths: List[str], commit_sha: str) -> List[str]:
+        """Uses the proprietary CABGP algorithm via SDK and ForgeIQ-backend."""
+        if not self.sdk_client:
+            logger.error(f"CABGP integration: SDK client not available for project {project_id}. Falling back to core logic.")
+            # Fallback to core logic if SDK is not there
+            return self._determine_affected_tasks_core(project_id, changed_files_paths)
 
-        span_name = "dependency_agent._determine_affected_tasks"
-        
-        if not self.tracer: # Fallback if tracer couldn't initialize
-            return self.__determine_affected_tasks_logic(project_id, changed_files_paths)
+        logger.info(f"CABGP integration: Requesting CABGP analysis for project '{project_id}', commit '{commit_sha}'.")
 
-        with self.tracer.start_as_current_span(span_name, context=current_span_context) as span:
-            span.set_attributes({
-                "dependency_agent.project_id": project_id,
-                "dependency_agent.num_input_changed_files": len(changed_files_paths)
-            })
-            results = self.__determine_affected_tasks_logic(project_id, changed_files_paths)
-            span.set_attribute("dependency_agent.num_affected_tasks_determined", len(results))
-            return results
+        # Prepare context for CABGP. This needs to match what your CABGP algorithm expects.
+        # Your CABGP runAlgorithm(context) from response #92 expected: { dag, changeMap, fileSemantics }
+        # We need to provide these or a compatible structure.
+        # For V0.2, let's pass changed_files and project_id. The private AlgorithmAgent/CABGP
+        # would be responsible for fetching the current DAG or fileSemantics if it needs them.
+        context_data_for_cabgp = {
+            "project_id": project_id,
+            "commit_sha": commit_sha,
+            "changed_files": changed_files_paths, # CABGP might want more than just paths, e.g. diffs
+            "current_dag_hint": core_get_project_dag(project_id) # Provide current simple DAG as hint
+        }
 
-    def __determine_affected_tasks_logic(self, project_id: str, changed_files_paths: List[str]) -> List[str]:
-        if not changed_files_paths:
-            logger.info(f"No changed files provided for project {project_id}, defaulting to full DAG.")
-            affected = get_project_dag(project_id) # from core.build_graph
-            logger.info(f"Defaulting to all tasks for project {project_id}: {affected}")
-            return affected
-
-        logger.info(f"Detecting affected tasks for project {project_id} based on {len(changed_files_paths)} changed file(s).")
-        affected_tasks = detect_changed_tasks(project=project_id, changed_files=changed_files_paths) # from core.build_graph
-        logger.info(f"Affected tasks for project {project_id}: {affected_tasks}")
-        return affected_tasks
-
-    async def handle_new_commit_event(self, event_data_str: str):
-        # Extract trace context from event_data_str if it was propagated, e.g. from headers or message attributes
-        # For now, we assume a new trace might start here or link to an existing one if context is found.
-        # This example doesn't show context propagation from Redis message, but OTel libraries might have ways.
-        span_name = "dependency_agent.handle_new_commit_event"
-        
-        if not self.tracer: # Fallback
-            await self._handle_new_commit_event_logic_from_string(event_data_str)
-            return
-
-        with self.tracer.start_as_current_span(span_name) as span: # Starts a new trace or child span
-            try:
-                event: NewCommitEvent = json.loads(event_data_str)
-                # Basic validation
-                if not (event.get("event_type") == "NewCommitEvent" and 
-                        "project_id" in event and "commit_sha" in event and "changed_files" in event):
-                    logger.error(f"Malformed NewCommitEvent: {event_data_str[:200]}")
-                    span.set_status(trace.Status(trace.StatusCode.ERROR, "Malformed event data"))
-                    return
-                
-                span.set_attributes({
-                    "messaging.system": "redis", # OTel semantic convention
-                    "messaging.operation": "process",
-                    "messaging.message.id": event.get("event_id", str(uuid.uuid4())), # Assuming event_id in NewCommitEvent
-                    "messaging.destination.name": COMMIT_EVENT_CHANNEL_PATTERN, # The channel pattern listened to
-                    "dependency_agent.project_id": event["project_id"],
-                    "dependency_agent.commit_sha": event["commit_sha"],
-                    "dependency_agent.num_changed_files": len(event["changed_files"])
-                })
-                logger.info(f"DependencyAgent handling NewCommitEvent for project {event['project_id']}, commit {event['commit_sha']}")
-                
-                # Call the core logic, passing the parsed event
-                await self._handle_new_commit_event_logic(event)
-
-            except json.JSONDecodeError:
-                logger.error(f"Could not decode JSON from event: {event_data_str[:200]}")
-                span.set_status(trace.Status(trace.StatusCode.ERROR, "JSON decode error"))
-            except Exception as e:
-                logger.error(f"Error handling NewCommitEvent: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, "Core event handling failed"))
-    
-    async def _handle_new_commit_event_logic_from_string(self, event_data_str: str):
-        """ Non-traced fallback for the main logic if tracer failed to initialize """
+        span = self._start_trace_span_if_available("call_cabgp_via_sdk", project_id=project_id, algorithm_id=CABGP_ALGORITHM_ID)
         try:
-            event: NewCommitEvent = json.loads(event_data_str)
-            if not (event.get("event_type") == "NewCommitEvent" and 
-                    "project_id" in event and "commit_sha" in event and "changed_files" in event):
-                logger.error(f"Malformed NewCommitEvent (no trace): {event_data_str[:200]}")
-                return
-            await self._handle_new_commit_event_logic(event)
-        except json.JSONDecodeError:
-            logger.error(f"Could not decode JSON from event (no trace): {event_data_str[:200]}")
+            with span: #type: ignore
+                # This calls ForgeIQClient.apply_proprietary_algorithm
+                # which calls ForgeIQ-backend /api/forgeiq/algorithms/apply
+                # which then calls your private stack's /invoke_proprietary_algorithm endpoint
+                # that dynamically loads and runs the CABGP Python module.
+                response = await self.sdk_client.apply_proprietary_algorithm(
+                    algorithm_id=CABGP_ALGORITHM_ID,
+                    context_data=context_data_for_cabgp,
+                    project_id=project_id 
+                )
+                if _tracer and span and response: 
+                    span.set_attribute("cabgp.response_status", response.get("status"))
+
+                if response and response.get("status") == "success" and response.get("result"):
+                    # Assume CABGP result contains a list of affected task IDs or names in a specific field
+                    # e.g., response["result"]["affected_tasks_list"]
+                    # This depends on the output structure of your CABGP.py run_algorithm
+                    cabgp_result = response["result"]
+                    affected_tasks = cabgp_result.get("impacted_nodes") or cabgp_result.get("affected_components") or cabgp_result.get("nodes_to_rebuild")
+
+                    if affected_tasks is not None and isinstance(affected_tasks, list):
+                        logger.info(f"CABGP successfully determined affected tasks for project {project_id}: {affected_tasks}")
+                        if _tracer and _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                        return affected_tasks
+                    else:
+                        logger.warning(f"CABGP response for {project_id} was successful but affected tasks list is missing or not a list. Response: {message_summary(str(cabgp_result))}")
+                        if _tracer and _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "CABGP Invalid Result Format"))
+                else:
+                    error_msg = response.get("error_message", "Unknown error from CABGP via API.") if response else "No response from CABGP via API."
+                    logger.error(f"CABGP analysis failed or returned unexpected response for project {project_id}: {error_msg}")
+                    if _tracer and _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, f"CABGP API call failed: {error_msg}"))
+        except ForgeIQSDKError as e_sdk: # Catch specific SDK errors
+            logger.error(f"SDK Error calling CABGP for project {project_id}: {e_sdk}", exc_info=True)
+            if _tracer and _trace_api and span: span.record_exception(e_sdk); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "SDK Error for CABGP"))
         except Exception as e:
-            logger.error(f"Error handling NewCommitEvent (no trace): {e}", exc_info=True)
+            logger.error(f"Unexpected error during CABGP call for project {project_id}: {e}", exc_info=True)
+            if _tracer and _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "CABGP call unexpected error"))
+
+        logger.warning(f"Falling back to core dependency logic for project {project_id} after CABGP issue.")
+        return self._determine_affected_tasks_core(project_id, changed_files_paths)
 
 
-    async def _handle_new_commit_event_logic(self, event: NewCommitEvent):
+    def _determine_affected_tasks_core(self, project_id: str, changed_files_paths: List[str]) -> List[str]:
+        """Uses the core.build_graph logic (user-provided Python code)."""
+        # (This is the logic from DependencyAgent V0.1 - response #73)
+        span_attrs = {"project_id":project_id, "num_changed_files":len(changed_files_paths), "method":"core_logic"}
+        span = self._start_trace_span_if_available("_determine_affected_tasks_core", **span_attrs)
+        try:
+            with span: #type: ignore
+                if not changed_files_paths:
+                    logger.info(f"Core: No changed files for project {project_id}, defaulting to full DAG.")
+                    affected = core_get_project_dag(project_id) 
+                    logger.info(f"Core: Defaulting to all tasks for {project_id}: {affected}")
+                    if _tracer and span: span.set_attribute("core_logic.result_count", len(affected))
+                    return affected
+
+                logger.info(f"Core: Detecting affected tasks for {project_id} from {len(changed_files_paths)} changed file(s).")
+                affected_tasks = core_detect_changed_tasks(project=project_id, changed_files=changed_files_paths)
+                logger.info(f"Core: Affected tasks for {project_id}: {affected_tasks}")
+                if _tracer and span: span.set_attribute("core_logic.result_count", len(affected_tasks))
+                return affected_tasks
+        except Exception as e:
+            logger.error(f"Error in _determine_affected_tasks_core for {project_id}: {e}", exc_info=True)
+            if _tracer and _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
+            return core_get_project_dag(project_id) # Fallback to all tasks on error
+
+
+    async def _handle_new_commit_event_logic(self, event: NewCommitEvent): # Updated to use CABGP or core
         project_id = event["project_id"]
         commit_sha = event["commit_sha"]
-        
-        changed_file_paths = [change['file_path'] for change in event["changed_files"]]
-        affected_tasks = self._determine_affected_tasks(project_id, changed_file_paths)
+        changed_file_paths = [change['file_path'] for change in event.get("changed_files", [])]
 
-        if affected_tasks:
+        affected_tasks: List[str] = []
+        if USE_PROPRIETARY_CABGP:
+            logger.info(f"Attempting to use CABGP for dependency analysis for project {project_id}.")
+            affected_tasks = await self._determine_affected_tasks_with_cabgp(project_id, changed_file_paths, commit_sha)
+        else:
+            logger.info(f"Using core build-graph logic for dependency analysis for project {project_id}.")
+            affected_tasks = self._determine_affected_tasks_core(project_id, changed_file_paths)
+
+        if affected_tasks is not None: # Check for None in case CABGP call had issues and didn't fallback properly
             if self.event_bus.redis_client:
-                # Create a new span for publishing the event, linking it to the current span
-                span_publish_name = "dependency_agent.publish_affected_tasks_event"
-                current_span_context = None
-                if self.tracer:
-                    current_span_for_publish = trace.get_current_span()
-                    current_span_context = trace.set_span_in_context(current_span_for_publish)
-
-                if not self.tracer: # Fallback
-                     self._publish_affected_tasks_logic(event, project_id, commit_sha, affected_tasks)
-                     return
-
-                with self.tracer.start_as_current_span(span_publish_name, context=current_span_context) as pub_span:
-                    self._publish_affected_tasks_logic(event, project_id, commit_sha, affected_tasks, pub_span)
+                affected_event = AffectedTasksIdentifiedEvent(
+                    event_type="AffectedTasksIdentifiedEvent",
+                    triggering_event_id=event.get("event_id", str(uuid.uuid4())),
+                    project_id=project_id, commit_sha=commit_sha, affected_tasks=affected_tasks,
+                    timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+                )
+                channel = AFFECTED_TASKS_EVENT_CHANNEL_TEMPLATE.format(project_id=project_id)
+                self.event_bus.publish(channel, affected_event) #type: ignore
+                logger.info(f"Published AffectedTasksIdentifiedEvent for project {project_id}, commit {commit_sha}. Tasks: {affected_tasks}")
+                if self.tracer_instance: self.tracer_instance.get_current_span().add_event("Published AffectedTasksIdentifiedEvent", {"num_affected_tasks": len(affected_tasks)})
             else:
                 logger.error("Cannot publish AffectedTasksIdentifiedEvent: EventBus not connected.")
-                if self.tracer: trace.get_current_span().set_attribute("publish_error", "event_bus_not_connected")
-        elif not affected_tasks: # Explicitly check for empty list
-            logger.info(f"No tasks determined to be affected for project {project_id}, commit {commit_sha}.")
-            if self.tracer: trace.get_current_span().add_event("NoAffectedTasksFound")
+        else: # affected_tasks is None, indicating a failure in determination even after fallback
+            logger.error(f"Failed to determine affected tasks for project {project_id}, commit {commit_sha}. No event published.")
 
+    # ... (handle_new_commit_event wrapper, main_event_loop, main_async_runner, if __name__ == "__main__"
+    #      remain structurally the same as V0.1 from response #73.
+    #      Ensure they call the updated _handle_new_commit_event_logic correctly and handle async.)
+    # For brevity, I'll paste the full structure for these main control flows.
 
-    def _publish_affected_tasks_logic(self, event: NewCommitEvent, project_id: str, commit_sha: str, affected_tasks: List[str], pub_span: Optional[trace.Span] = None):
-        """Helper for publishing, optionally within a tracing span"""
-        affected_event = AffectedTasksIdentifiedEvent(
-            event_type="AffectedTasksIdentifiedEvent",
-            triggering_event_id=event.get("event_id", str(uuid.uuid4())), # Use event_id from NewCommitEvent
-            project_id=project_id,
-            commit_sha=commit_sha,
-            affected_tasks=affected_tasks,
-            timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
-        )
-        channel = AFFECTED_TASKS_EVENT_CHANNEL_TEMPLATE.format(project_id=project_id)
-        
-        if pub_span:
-            pub_span.set_attributes({
-                "messaging.system": "redis",
-                "messaging.destination.name": channel,
-                "messaging.message.id": affected_event["triggering_event_id"], # Should be unique for the new event
-                "dependency_agent.published_event_type": affected_event["event_type"],
-                "dependency_agent.num_affected_tasks_published": len(affected_tasks)
-            })
+    async def handle_new_commit_event(self, event_data_str: str): # Wrapper from V0.1
+        span = self._start_trace_span_if_available("handle_new_commit_event")
+        try:
+            with span: #type: ignore
+                event: NewCommitEvent = json.loads(event_data_str) #type: ignore
+                if not (event.get("event_type") == "NewCommitEvent" and 
+                        all(k in event for k in ["project_id", "commit_sha", "changed_files"])):
+                    logger.error(f"Malformed NewCommitEvent: {event_data_str[:200]}")
+                    if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Malformed event")); 
+                    return
 
-        self.event_bus.publish(channel, affected_event)
-        logger.info(f"Published AffectedTasksIdentifiedEvent for project {project_id}, commit {commit_sha}. Tasks: {affected_tasks}")
+                if _tracer and span: span.set_attributes({
+                    "messaging.system": "redis", "dependency_agent.event_id": event.get("event_id"),
+                    "dependency_agent.project_id": event["project_id"], "dependency_agent.commit_sha": event["commit_sha"],
+                    "dependency_agent.num_changed_files": len(event["changed_files"])
+                })
+                logger.info(f"DependencyAgent handling NewCommitEvent for project {event['project_id']}")
+                await self._handle_new_commit_event_logic(event) # Call the main logic
+        except json.JSONDecodeError: logger.error(f"Could not decode JSON: {event_data_str[:200]}"); 
+        if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "JSON decode error"))
+        except Exception as e: logger.error(f"Error handling NewCommitEvent: {e}", exc_info=True); 
+        if _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Event handling failed"))
 
-
-    async def main_event_loop(self):
-        if not self.event_bus.redis_client:
-            logger.critical("DependencyAgent: Cannot start main event loop, EventBus not connected. Exiting after a delay.")
-            await asyncio.sleep(60) # Avoid rapid restarts if containerized
-            return
-
-        pubsub = self.event_bus.subscribe_to_channel(COMMIT_EVENT_CHANNEL_PATTERN)
-        if not pubsub:
-            logger.critical(f"DependencyAgent: Failed to subscribe to {COMMIT_EVENT_CHANNEL_PATTERN}. Worker cannot start. Exiting after a delay.")
-            await asyncio.sleep(60)
-            return
-
-        logger.info(f"DependencyAgent worker subscribed to {COMMIT_EVENT_CHANNEL_PATTERN}, listening for commit events...")
+    async def main_event_loop(self): # From V0.1
+        if not self.event_bus.redis_client: logger.critical("DependencyAgent: EventBus not connected. Exiting."); await asyncio.sleep(60); return
+        pubsub = self.event_bus.subscribe_to_channel(COMMIT_EVENT_CHANNEL_PATTERN) #type: ignore
+        if not pubsub: logger.critical(f"DependencyAgent: Failed to subscribe to {COMMIT_EVENT_CHANNEL_PATTERN}. Exiting."); await asyncio.sleep(60); return
+        logger.info(f"DependencyAgent worker (V0.2) subscribed to '{COMMIT_EVENT_CHANNEL_PATTERN}', listening...")
         try:
             while True:
-                # Use asyncio.to_thread for the blocking pubsub.get_message call
-                message = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0) # Check for message every second
-                if message and message["type"] == "pmessage": # pmessage for pattern subscriptions
-                    logger.debug(f"Received raw message on {message['channel']}: {message_summary(message['data'])}")
-                    # Create a new trace for each message received, or link if context is propagated
-                    await self.handle_new_commit_event(message["data"]) 
-                
-                # Add a small sleep to prevent a very tight loop if get_message returns None immediately (e.g. due to timeout)
-                # and to allow other asyncio tasks to run if any were created.
-                await asyncio.sleep(0.01) 
-        except KeyboardInterrupt:
-            logger.info("DependencyAgent event loop interrupted by KeyboardInterrupt.")
-        except redis.exceptions.ConnectionError as redis_err:
-            logger.error(f"Redis connection error in main event loop: {redis_err}. Attempting to reconnect or exit.", exc_info=True)
-            # Implement more robust reconnection logic or graceful shutdown here
-            # For now, just log and it will eventually exit the loop.
-            # Consider re-raising or exiting if reconnection fails after retries.
-            raise
-        except Exception as e:
-            logger.error(f"Critical error in DependencyAgent event loop: {e}", exc_info=True)
-            # Consider specific error handling or shutdown procedures
+                message = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0) #type: ignore
+                if message and message["type"] == "pmessage":
+                    await self.handle_new_commit_event(message["data"]) #type: ignore
+                await asyncio.sleep(0.01)
+        except KeyboardInterrupt: logger.info("DependencyAgent event loop interrupted.")
+        except Exception as e: logger.error(f"Critical error in DependencyAgent event loop: {e}", exc_info=True)
         finally:
-            logger.info("DependencyAgent shutting down pubsub...")
+            logger.info("DependencyAgent shutting down pubsub...");
             if pubsub:
-                try: 
-                    # These are blocking calls, should also be in a thread for clean async shutdown
-                    await asyncio.to_thread(pubsub.punsubscribe, COMMIT_EVENT_CHANNEL_PATTERN)
-                    await asyncio.to_thread(pubsub.close)
-                except Exception as e_close:
-                     logger.error(f"Error closing pubsub for DependencyAgent: {e_close}")
+                try: await asyncio.to_thread(pubsub.punsubscribe, COMMIT_EVENT_CHANNEL_PATTERN); await asyncio.to_thread(pubsub.close) #type: ignore
+                except: pass
+            if self.sdk_client: await self.sdk_client.close() # Close SDK client if it was initialized
             logger.info("DependencyAgent shutdown complete.")
 
-async def main(): # Wrapper for asyncio execution
-    # Import trace here only if needed for main, typically setup_tracing handles global tracer
-    # from opentelemetry import trace 
+async def main_async_runner(): # From V0.1
+    # Ensure sdk_client_factory can be imported if SDK is used directly by agent for other purposes
+    # Or just pass None if only this CABGP call needs it.
+    # For this version, __init__ creates the client if USE_PROPRIETARY_CABGP is true.
     agent = DependencyAgent()
-    
-    main_span_name = "dependency_agent.main_execution"
-    if not agent.tracer: # Fallback if tracer couldn't initialize
-        await agent.main_event_loop()
-        return
+    await agent.main_event_loop()
 
-    with agent.tracer.start_as_current_span(main_span_name) as main_span:
-        try:
-            await agent.main_event_loop()
-            main_span.set_status(trace.StatusCode.OK)
-        except Exception as e:
-            logger.critical(f"DependencyAgent main execution failed: {e}", exc_info=True)
-            main_span.record_exception(e)
-            main_span.set_status(trace.Status(trace.StatusCode.ERROR, "Main event loop crashed"))
-            raise # Re-raise to ensure process exits with error if desired
-
-if __name__ == "__main__":
-    # This structure ensures that setup_tracing is called once when the module is imported,
-    # and then the main async logic runs.
-    # from opentelemetry import trace # For setting status/attributes directly on trace if needed
+if __name__ == "__main__": # From V0.1
     try:
-        asyncio.run(main())
+        asyncio.run(main_async_runner())
     except KeyboardInterrupt:
-        logger.info("DependencyAgent process stopped by user (KeyboardInterrupt in __main__).")
-    except Exception as e: # Catch-all for any unhandled error during asyncio.run(main())
-        # This might catch errors from the main_event_loop if it re-raised them
-        logger.critical(f"DependencyAgent failed to run or unhandled error in __main__: {e}", exc_info=True)
-        # Exit with an error code if the main execution fails critically
-        # import sys
-        # sys.exit(1)
+        logger.info("DependencyAgent main execution stopped by user.")
+    except Exception as e:
+        logger.critical(f"DependencyAgent failed to start or unhandled error: {e}", exc_info=True)
