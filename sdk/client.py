@@ -183,3 +183,9 @@ async def request_build_strategy_optimization(
     response_data = await self._request("POST", endpoint, json_data=payload)
     # Assume response_data matches SDKOptimizedAlgorithmResponse
     return SDKOptimizedAlgorithmResponse(**response_data) # type: ignore
+# In ForgeIQClient class (sdk/client.py)
+async def request_mcp_build_strategy(self, project_id: str, current_dag_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    endpoint = f"/api/forgeiq/mcp/optimize-strategy/{project_id}"
+    payload = {"current_dag_info": current_dag_info} # MCP might need current DAG
+    logger.info(f"SDK: Requesting MCP build strategy optimization for project '{project_id}'")
+    return await self._request("POST", endpoint, json_data=payload)
