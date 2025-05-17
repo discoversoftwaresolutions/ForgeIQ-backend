@@ -7,8 +7,8 @@ fastapi==0.110.0
 uvicorn[standard]==0.29.0 # For running FastAPI & Streamlit (if using Uvicorn for Streamlit)
 pydantic==2.6.4
 streamlit # For ForgeIQ-ui (Streamlit version) & DebugIQ-frontend
-
-# --- Data & Machine Learning ---
+boto3>=1.28.0 # AWS SDK for Python, for S3 interaction
+prometheus_client>=0.17.0# --- Data & Machine Learning ---
 sentence-transformers>=2.7.0,<3.0.0 # For CodeNavAgent embeddings
 weaviate-client>=3.26.0,<4.0.0 # Weaviate Python client v3.x (aligns with weaviate.Client syntax)
 numpy>=1.26.0,<2.0.0 # Often a dependency for ML/data libraries
