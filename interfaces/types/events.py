@@ -158,3 +158,15 @@ class GovernanceAlertEvent(TypedDict): # More generic than SLA violation
     severity: str        # 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'
     description: str
     context: Dict[str, Any] # Relevant data from the event that triggered the alert
+# ... (existing TypedDicts) ...
+
+class ProprietaryAuditEvent(TypedDict): # Event published by private governance_bridge
+    event_type: str       # "ProprietaryAuditEvent"
+    audit_id: str         # Unique ID from the private system
+    timestamp: str        # ISO datetime from the private system
+    source_service: str   # e.g., "MCPController", "AlgorithmAgent" (from private stack)
+    actor: Optional[str]
+    action: str           # Description of the action being audited
+    data_payload: Dict[str, Any] # The core data/log being shared
+    signature: Optional[str]     # If it's a "signed log"
+    metadata: Optional[Dict[str, Any]]
