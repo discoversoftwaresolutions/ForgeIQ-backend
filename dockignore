@@ -1,0 +1,41 @@
+# Exclude Git version control files
+.git
+.gitignore
+
+# Exclude Python bytecode and cache directories
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.eggs
+
+# Exclude virtual environments and environment files
+env/
+venv/
+*.env
+
+# Exclude log files and temporary data
+*.log
+*.tmp
+tmp/
+
+# Exclude build artifacts
+build/
+dist/
+
+# Exclude documentation files if not needed for runtime
+docs/
+
+# Exclude IDE-specific files and directories
+.vscode/
+.idea/
+
+# Exclude OS-specific files (e.g., macOS)
+.DS_Store
+
+# Exclude Node modules (if any exist in the repo)
+node_modules/
+
+# Exclude tests if they are not required at runtime
+tests/
