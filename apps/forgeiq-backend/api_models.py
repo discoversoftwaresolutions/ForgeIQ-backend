@@ -95,3 +95,15 @@ class TaskListResponse(BaseModel):
 
 # You can add more specific request/response models here as your API evolves.
 # For example, if POST/PUT endpoints expect specific data for creation/update.
+# In apps/forgeiq-backend/app/api_models.py
+class ApplyAlgorithmRequest(BaseModel):
+    algorithm_id: str # e.g., "CABGP", "RBCP"
+    project_id: Optional[str] = None
+    context_data: Dict[str, Any]
+
+class ApplyAlgorithmResponse(BaseModel):
+    algorithm_id: str
+    project_id: Optional[str]
+    status: str
+    result: Optional[Dict[str, Any]] = None
+    message: Optional[str] = None
