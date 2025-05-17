@@ -36,4 +36,10 @@ from .orchestration import OrchestrationFlowState
 
 __all__.extend([
     "OrchestrationFlowState",
+])# ... (existing exports) ...
+from .events import ProprietaryAuditEvent
+
+__all__.extend([
+    # ... (existing exports) ...
+    "ProprietaryAuditEvent",
 ])
