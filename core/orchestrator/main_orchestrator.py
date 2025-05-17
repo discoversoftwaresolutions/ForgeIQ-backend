@@ -382,3 +382,50 @@ class Orchestrator:
 #     # else:
 #     #    asyncio.run(run_orchestrator_service())
 #     logger.info("Orchestrator module loaded. Can be run as a service or its methods called.")
+# In Orchestrator class (core/orchestrator/main_orchestrator.py)
+async def request_mcp_strategy_optimization(self, 
+                                          project_id: str, 
+                                          current_dag: Optional[DagDefinition] = None
+                                         ) -> Optional[Dict[str, Any]]: # Or specific MCPStrategyResponse model
+    if not self.forgeiq_sdk_client:
+        logger.error(f"Orchestrator: SDK client not available to request MCP strategy for '{project_id}'.")
+        return None
+
+    span = self._start_trace_span_if_available("request_mcp_strategy", project_id=project_id)
+    logger.info(f"Orchestrator: Requesting MCP build strategy optimization for project '{project_id}'.")
+    try:
+        with span: #type: ignore
+            # Convert current_dag (TypedDict) to dict for SDK if needed, or SDK handles TypedDicts
+            dag_info_payload = current_dag if current_dag else None # Or a summary
+
+            # Create the SDKAlgorithmContext-like structure if the SDK method reuses it
+            # Or, if SDK has a new context type for this, use that.
+            # For now, assuming a simple dict payload for the SDK call.
+            sdk_context_for_mcp = { # This should match what SDK's request_mcp_build_strategy expects
+                "project_id": project_id,
+                "dag_representation": current_dag.get("nodes") if current_dag else None, # Example
+                "telemetry_data": {"source": "Orchestrator_MCP_Request"}
+            }
+
+            # This calls the new SDK method, which calls the new ForgeIQ-backend endpoint, 
+            # which then calls your private MCP API.
+            # Assuming the SDK method request_mcp_build_strategy expects project_id and current_dag_info
+            mcp_response = await self.forgeiq_sdk_client.request_mcp_build_strategy(
+                project_id=project_id,
+                current_dag_info=dag_info_payload # Pass the DAG info if needed by MCP
+            )
+
+            if mcp_response:
+                logger.info(f"Orchestrator: Received strategy from MCP for '{project_id}': {message_summary(mcp_response)}")
+                # TODO: Orchestrator would then process this strategy
+                # (e.g., use it to create/modify a DAG for PlanAgent)
+                if _trace_api and span: span.set_attribute("mcp.response_status", mcp_response.get("status")); span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                return mcp_response
+            else:
+                logger.warning(f"Orchestrator: No strategy response from MCP for '{project_id}'.")
+                if _trace_api and span: span.set_attribute("mcp.response_received", False)
+                return None
+    except Exception as e:
+        logger.error(f"Orchestrator: Error requesting MCP strategy for '{project_id}': {e}", exc_info=True)
+        if _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
+        return None
