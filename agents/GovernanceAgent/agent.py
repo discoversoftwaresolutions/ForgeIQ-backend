@@ -314,3 +314,108 @@ if __name__ == "__main__":
         logger.info("GovernanceAgent main execution stopped by user.")
     except Exception as e:
         logger.critical(f"GovernanceAgent failed to start or unhandled error in __main__: {e}", exc_info=True)
+# In agents/GovernanceAgent/app/agent.py
+
+# ... (other imports) ...
+from interfaces.types.events import (
+    # ... existing ...
+    ProprietaryAuditEvent # <<< NEWLY IMPORTED
+)
+
+# Update AUDITABLE_EVENT_PATTERNS if needed, or ensure it's broad enough
+# For direct subscription to the specific channel:
+PRIVATE_GOVERNANCE_AUDIT_CHANNEL = "events.internal.governance.audit" 
+# Add this to the list of channels/patterns the agent subscribes to in main_event_loop.
+# If AUDITABLE_EVENT_PATTERNS already includes "events.internal.*", it might catch it.
+# For clarity, let's assume we add it explicitly to the list it subscribes to.
+
+# ... inside GovernanceAgent class ...
+
+async def handle_proprietary_audit_event(self, event_data: ProprietaryAuditEvent, channel: str):
+    span = self._start_trace_span_if_available("handle_proprietary_audit_event", 
+                                               audit_id=event_data.get("audit_id"), 
+                                               source_service=event_data.get("source_service"))
+    try:
+        with span: # type: ignore
+            logger.info(f"Received ProprietaryAuditEvent from channel '{channel}': ID {event_data.get('audit_id')}")
+
+            # Create a standard AuditLogEntry from this private event for our system's audit trail
+            # This shows how data from private stack is integrated into public audit trail
+            audit_entry = AuditLogEntry(
+                event_type="AuditEvent", # Our standard audit event type
+                audit_id=str(uuid.uuid4()), # New ID for this specific log entry in our system
+                timestamp=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
+                source_event_type=event_data.get("event_type", "ProprietaryAuditEvent"),
+                source_event_id=event_data.get("audit_id"),
+                service_name=event_data.get("source_service", "PrivateIntelligenceStack"),
+                project_id=event_data.get("data_payload", {}).get("project_id"), # If available in payload
+                commit_sha=event_data.get("data_payload", {}).get("commit_sha"), # If available
+                user_or_actor=event_data.get("actor", "MCP/GovernanceBridge"),
+                action_description=f"Received audit from private stack: {event_data.get('action', 'No action specified')}",
+                event_details={ # Store the whole private event as details
+                    "private_audit_id": event_data.get("audit_id"),
+                    "private_timestamp": event_data.get("timestamp"),
+                    "private_source_service": event_data.get("source_service"),
+                    "private_action": event_data.get("action"),
+                    "private_payload": event_data.get("data_payload"),
+                    "private_signature": event_data.get("signature")
+                },
+                policy_check_results=None, # This agent might run its own checks
+                severity=event_data.get("metadata", {}).get("severity", "INFO") # If private event has severity
+            )
+            await self._persist_audit_log(audit_entry)
+            if _trace_api and span: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+    except Exception as e:
+        logger.error(f"Error handling ProprietaryAuditEvent: {e}", exc_info=True)
+        if _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
+
+
+async def _route_event(self, channel: str, event_data_str: str, parent_span: Optional[Any] = None):
+    # ... (existing _route_event logic from response #73 or #77) ...
+    # Add a case for the new event type:
+    # event_data = json.loads(event_data_str)
+    # event_type = event_data.get("event_type")
+    # ...
+    # elif event_type == "ProprietaryAuditEvent": # The type string used by your private bridge
+    #     if all(k in event_data for k in ["audit_id", "timestamp", "source_service", "action", "data_payload"]):
+    #         await self.handle_proprietary_audit_event(ProprietaryAuditEvent(**event_data), channel) #type: ignore
+    #     else: 
+    #         logger.error(f"Malformed ProprietaryAuditEvent data for routing: {event_data_str[:200]}")
+    # ...
+    # A more generic way if the channel itself is specific:
+    if channel == PRIVATE_GOVERNANCE_AUDIT_CHANNEL: # If GovernanceAgent subscribes to this specific channel
+        try:
+            event_data_dict = json.loads(event_data_str)
+            # Assuming the payload itself matches ProprietaryAuditEvent structure
+            await self.handle_proprietary_audit_event(event_data_dict, channel) #type: ignore
+        except json.JSONDecodeError:
+            logger.error(f"Could not decode JSON for ProprietaryAuditEvent from '{channel}'")
+        return # End routing for this specific channel
+
+    # ... (rest of existing _route_event logic for other event types) ...
+
+
+async def main_event_loop(self):
+    # ...
+    # In main_event_loop, add PRIVATE_GOVERNANCE_AUDIT_CHANNEL to the subscription list
+    # if using specific channel subscription instead of just patterns in AUDITABLE_EVENT_PATTERNS
+    # If AUDITABLE_EVENT_PATTERNS covers "events.internal.governance.audit", no change needed to subscription list.
+    # For explicit subscription:
+    # try:
+    #     await asyncio.to_thread(pubsub.subscribe, PRIVATE_GOVERNANCE_AUDIT_CHANNEL)
+    #     logger.info(f"GovernanceAgent subscribed to specific channel '{PRIVATE_GOVERNANCE_AUDIT_CHANNEL}'")
+    # except ...
+    # ...
+    # And ensure punsubscribe/unsubscribe handles it in `finally`.
+    # For V0.1, having AUDITABLE_EVENT_PATTERNS = ["events.internal.governance.*", ...other patterns...] is simplest.
+    # Then the existing psubscribe loop will pick it up.
+    # The current AUDITABLE_EVENT_PATTERNS includes "events.system.*", so if you publish to
+    # "events.system.private_governance.audit", it would be caught. Let's refine it.
+
+    # Refined subscription in main_event_loop:
+    current_patterns_to_subscribe = AUDITABLE_EVENT_PATTERNS + [PRIVATE_GOVERNANCE_AUDIT_CHANNEL] # Add specific channel if not covered by patterns
+    # ... then use current_patterns_to_subscribe in the psubscribe/subscribe loop ...
+    # Actually, pubsub.psubscribe handles patterns. If PRIVATE_GOVERNANCE_AUDIT_CHANNEL is specific,
+    # you'd use pubsub.subscribe for it, or ensure AUDITABLE_EVENT_PATTERNS includes a pattern that matches it.
+    # Let's assume AUDITABLE_EVENT_PATTERNS = ["events.project.*", "events.system.*", "events.agent.*.lifecycle", "events.internal.governance.*"]
+    # ... (rest of main_event_loop)
