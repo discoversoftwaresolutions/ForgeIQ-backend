@@ -189,3 +189,41 @@ async def request_mcp_build_strategy(self, project_id: str, current_dag_info: Op
     payload = {"current_dag_info": current_dag_info} # MCP might need current DAG
     logger.info(f"SDK: Requesting MCP build strategy optimization for project '{project_id}'")
     return await self._request("POST", endpoint, json_data=payload)
+# =================================================================
+# 📁 sdk/client.py (additions to ForgeIQClient class)
+# =================================================================
+# ... (ensure these imports are at the top of client.py)
+# from .models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
+# import logging
+# logger = logging.getLogger(__name__) # if not already defined
+# ...
+
+# Inside ForgeIQClient class:
+async def request_mcp_build_strategy(
+    self,
+    project_id: str,
+    current_dag_snapshot: Optional[List[Dict[str, Any]]] = None,
+    optimization_goal: Optional[str] = None,
+    additional_mcp_context: Optional[Dict[str, Any]] = None
+) -> SDKMCPStrategyResponse: # Using SDK's TypedDict for return type
+    """
+    Requests a build strategy optimization from the private MCP
+    via the ForgeIQ-backend.
+    """
+    endpoint = f"/api/forgeiq/mcp/optimize-strategy/{project_id}" # Matches backend API
+
+    # Payload for the backend API, matching MCPStrategyApiRequest Pydantic model
+    payload = {
+        "current_dag_snapshot": current_dag_snapshot,
+        "optimization_goal": optimization_goal,
+        "additional_mcp_context": additional_mcp_context
+    }
+
+    logger.info(f"SDK: Requesting MCP build strategy optimization for project '{project_id}'. Goal: {optimization_goal or 'default'}")
+
+    response_data = await self._request("POST", endpoint, json_data=payload)
+
+    # Assuming response_data from backend matches SDKMCPStrategyResponse structure
+    # Pydantic models in the backend handle the exact API contract.
+    # The SDK might just pass through the dict or could re-validate with TypedDicts/Pydantic.
+    return SDKMCPStrategyResponse(**response_data) #type: ignore
