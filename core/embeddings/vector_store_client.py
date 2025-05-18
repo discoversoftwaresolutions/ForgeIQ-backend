@@ -1,40 +1,39 @@
 import os
 import logging
 from typing import Dict, Any, Optional
+import weaviate
 
 # Initialize logger
 logger = logging.getLogger(__name__)
 
-# Weaviate configuration variables
-WEAVIATE_URL = os.getenv("WEAVIATE_URL")  # ✅ Properly aligned
-WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")  # Optional: for Weaviate Cloud API key authentication
+# Environment variables
+WEAVIATE_URL = os.getenv("WEAVIATE_URL")
+WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")
 
-# Define standard class name for code snippets (can be overridden)
-CODE_SNIPPET_CLASS_NAME = "CodeSnippet"
-DEFAULT_VECTOR_SEARCH_LIMIT = 10
+class VectorStoreClient:
+    def __init__(self, weaviate_url: Optional[str] = None, api_key: Optional[str] = None):
+        """
+        Initializes the Weaviate client for vector storage.
+        """
+        self.url: Optional[str] = weaviate_url or WEAVIATE_URL
+        self.api_key: Optional[str] = api_key or WEAVIATE_API_KEY
+        self.client: Optional[weaviate.Client] = None
 
-    class VectorStoreClient:
-        def __init__(self, weaviate_url: Optional[str] = None, api_key: Optional[str] = None):
-            self.url = weaviate_url or WEAVIATE_URL
-            self.api_key = api_key or WEAVIATE_API_KEY
-            self.client: Optional[weaviate.Client] = None
+        if not self.url:
+            logger.error("WEAVIATE_URL not configured. VectorStoreClient cannot operate.")
+            return  # Client remains None
 
-            if not self.url:
-                logger.error("WEAVIATE_URL not configured. VectorStoreClient cannot operate.")
-                return # Client remains None
+        client_params: Dict[str, Any] = {"url": self.url}
+        if self.api_key:
+            auth_config = weaviate.AuthApiKey(self.api_key)
+            client_params["auth_client_secret"] = auth_config
 
-            client_params: Dict[str, Any] = {"url": self.url}
-            if self.api_key:
-                auth_config = weaviate.AuthApiKey(api_key=self.api_key)
-                client_params["auth_client_secret"] = auth_config
-            
-            try:
-                self.client = weaviate.Client(**client_params)
-                if self.client.is_ready():
-                    logger.info(f"VectorStoreClient successfully connected to Weaviate at {self.url}")
-                else:
-                    logger.error(f"Weaviate instance at {self.url} is not ready upon client initialization.")
-                    self.client = None # Ensure client is None if not ready
+        try:
+            self.client = weaviate.Client(**client_params)
+            logger.info("Weaviate client initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize Weaviate client: {e}", exc_info=True)
+            self.client = None  # Ensure client remains None on failure
             except Exception as e:
                 logger.error(f"Failed to initialize Weaviate client at {self.url}: {e}", exc_info=True)
                 self.client = None
