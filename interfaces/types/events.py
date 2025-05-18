@@ -223,6 +223,63 @@ class CodeNavSearchResults(TypedDict):
     query_id: str  # Correlates with the original search query
     results: List[CodeNavSearchResultItem]
 
+class Status(TypedDict):
+    code: str  # "SUCCESS", "FAILED", "PENDING"
+    message: Optional[str]  # Additional details
+
+class Timestamped(TypedDict):
+    timestamp: str  # ISO formatted timestamp
+
+class AgentCapability(TypedDict):
+    capability_name: str  # e.g., "Docker Build", "Security Scan"
+    version: Optional[str]  # If applicable
+    description: Optional[str]
+
+class AgentEndpoint(TypedDict):
+    url: str
+    authentication_required: bool
+    headers: Optional[Dict[str, str]]  # If auth is needed
+
+class AgentRegistrationInfo(TypedDict):
+    agent_name: str
+    capabilities: List[AgentCapability]
+    endpoint: AgentEndpoint
+    metadata: Optional[Dict[str, Any]]
+
+class CacheKeyParams(TypedDict):
+    key: str
+    namespace: Optional[str]
+
+class CachedItemMetadata(TypedDict):
+    created_at: str  # Timestamp when cached
+    expiration: Optional[str]  # Expiry time if set
+    size_bytes: Optional[int]  # Size of the cached item
+
+class CacheGetResponse(TypedDict):
+    cache_hit: bool
+    data: Optional[Any]
+    metadata: Optional[CachedItemMetadata]
+
+class CacheStoreRequest(TypedDict):
+    key_params: CacheKeyParams
+    data: Any
+    expiration: Optional[str]  # If setting an expiry
+
+class CacheStoreResponse(TypedDict):
+    success: bool
+    message: Optional[str]
+
+class DagNode(TypedDict):
+    id: str  # Unique node identifier
+    task_type: str  # "lint", "test", "build", etc.
+    dependencies: List[str]  # Other nodes it depends on
+    parameters: Optional[Dict[str, Any]]
+
+class DagDefinition(TypedDict):
+    dag_id: str
+    project_id: Optional[str]
+    nodes: List[DagNode]
+
 # Ensure all event types are included in __all__
 __all__ = [
     "AffectedTasksIdentifiedEvent",
