@@ -1,32 +1,29 @@
-# ===================================
-# 📁 /app/interfaces/__init__.py
-# ===================================
+# ==================================
+# 📁 interfaces/types/__init__.py
+# ==================================
 
-# Correct the import path to reference the 'types' submodule
-# The 'events' module is expected to be in interfaces/types/events.py
-from .types.events import (
+# Corrected import statement - removed the invalid comment syntax
+# from .events import 
+from .events import (
     TestResult, TestFailedEvent,
     CodeNavSearchQuery, CodeNavSearchResultItem, CodeNavSearchResults,
     PatchSuggestion, PatchSuggestedEvent,
-    DeploymentStatusEvent, # Add other specific events needed at this level
-    DeploymentRequestEvent,
-    PipelineGenerationUserPrompt, PipelineGenerationRequestEvent,
-    DagDefinitionCreatedEvent,
+    # Core Operational Events
+    PipelineGenerationUserPrompt, PipelineGenerationRequestEvent, DagDefinitionCreatedEvent,
     TaskStatus, TaskStatusUpdateEvent, DagExecutionStatusEvent,
     NewCommitEvent, FileChange, AffectedTasksIdentifiedEvent,
     NewArtifactEvent, SecurityFinding, SecurityScanResultEvent,
+    DeploymentRequestEvent, DeploymentStatusEvent,
+    # Governance Events
     AuditLogEntry, SLAMetric, SLAViolationEvent, GovernanceAlertEvent,
+    # Add any other specific event types defined in ./events.py that you need to re-export
 )
 
-# You may also want to expose other types defined within the 'types' submodule
-from .types.common import Status, Timestamped
-from .types.agent import AgentCapability, AgentEndpoint, AgentRegistrationInfo
-from .types.cache import (
-    CacheKeyParams, CachedItemMetadata, CacheGetResponse,
-    CacheStoreRequest, CacheStoreResponse
-)
-from .types.graph import DagNode, DagDefinition
-from .types.task import TaskInfo, TaskExecutionRequest, TaskExecutionResult
+from .common import Status, Timestamped # Assuming common.py for these
+from .agent import AgentCapability, AgentEndpoint, AgentRegistrationInfo
+from .cache import CacheKeyParams, CachedItemMetadata, CacheGetResponse, CacheStoreRequest, CacheStoreResponse
+from .graph import DagNode, DagDefinition # Moving these here
+from .task import TaskInfo, TaskExecutionRequest, TaskExecutionResult # New task types
 
 
 __all__ = [
@@ -40,21 +37,20 @@ __all__ = [
     # Graph
     "DagNode", "DagDefinition",
     # Task
-    "TaskInfo", "TaskExecutionRequest", "TaskExecutionResult",
-
-    # Re-exporting specific events from interfaces.types.events
-    "TestResult", "TestFailedEvent",
+    "TaskInfo", "TaskExecutionRequest", "TaskExecutionResult", # New
+    # Events (alphabetical for easier management) - Ensure these are imported above
+    "AffectedTasksIdentifiedEvent",
+    "AuditLogEntry",
     "CodeNavSearchQuery", "CodeNavSearchResultItem", "CodeNavSearchResults",
-    "PatchSuggestion", "PatchSuggestedEvent",
-    "DeploymentStatusEvent",
-    "DeploymentRequestEvent",
-    "PipelineGenerationUserPrompt", "PipelineGenerationRequestEvent",
     "DagDefinitionCreatedEvent", "DagExecutionStatusEvent",
-    "NewCommitEvent", "FileChange", "AffectedTasksIdentifiedEvent",
-    "NewArtifactEvent", "SecurityFinding", "SecurityScanResultEvent",
-    "AuditLogEntry", "SLAMetric", "SLAViolationEvent", "GovernanceAlertEvent",
+    "DeploymentRequestEvent", "DeploymentStatusEvent",
+    "FileChange",
+    "GovernanceAlertEvent",
+    "NewArtifactEvent", "NewCommitEvent",
+    "PatchSuggestion", "PatchSuggestedEvent",
+    "PipelineGenerationUserPrompt", "PipelineGenerationRequestEvent",
+    "SLAMetric", "SLAViolationEvent",
+    "SecurityFinding", "SecurityScanResultEvent",
+    "TaskStatus", "TaskStatusUpdateEvent",
+    "TestFailedEvent", "TestResult",
 ]
-
-# Note: The __all__ list should include all names you want to make available
-# when someone does 'from interfaces import *'.
-# Ensure all names imported above that you want to export are in __all__.
