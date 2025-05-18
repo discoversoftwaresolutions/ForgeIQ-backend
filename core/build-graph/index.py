@@ -13,11 +13,15 @@ FILE_TASK_MAP = {
     "infra/": ["deploy"],
     "README.md": ["lint"]
 }
+from typing import Dict, List
 
-# Full project DAGs
 PROJECT_GRAPH: Dict[str, List[str]] = {
     "debugiq-core": ["lint", "test", "build", "deploy"],
     "forgeiq": ["lint", "build", "deploy"],
+}
+
+def get_project_dag(project: str) -> List[str]:
+    return PROJECT_GRAPH.get(project, [])
 }
 
 def get_project_dag(project: str) -> List[str]:
