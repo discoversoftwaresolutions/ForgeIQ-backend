@@ -206,6 +206,13 @@ class ProprietaryAuditEvent(TypedDict):
     action: str
     data_payload: Dict[str, Any]
 
+class CodeNavSearchQuery(TypedDict):
+    query_type: str  # "CodeNavSearchQuery"
+    query_text: str
+    project_id: str
+    limit: Optional[int]
+    filters: Optional[Dict[str, Any]]  # e.g., {"file_extension": ".py"}
+
 # Ensure all event types are included in __all__
 __all__ = [
     "AffectedTasksIdentifiedEvent",
