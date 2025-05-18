@@ -5,6 +5,7 @@ import logging
 from typing import List  
 from typing import Dict, List  
 FILE_TASK_MAP: Dict[str, List[str]] = {}
+from typing import Optional
 
 # --- Event Bus ---
 from .event_bus.redis_bus import EventBus, message_summary
@@ -86,7 +87,7 @@ except ImportError:
     logging.getLogger(__name__).warning("core.code_utils.code_parser not found or not fully defined.")
     # Define placeholders
     def scan_code_directory(dir_path: str, ignore_dirs=None, ignore_file_patterns=None, allowed_extensions=None) -> List[str]: return []
-    def get_language_from_extension(file_path: str) -> Optional[str]: return None
+    def get_language_from_extension(file_path: str) Optional[str]: 
     def chunk_code_content(content: str, language=None, file_path=None) -> List[Dict[str,Any]]: return []
     CodeChunk = dict #type: ignore
 
