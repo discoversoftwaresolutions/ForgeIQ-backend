@@ -1,5 +1,5 @@
 # ==========================================
-# 📁 interfaces_python/types/events.py
+# 📁 interfaces/types/events.py
 # ==========================================
 from typing import TypedDict, List, Optional, Dict, Any
 
@@ -51,7 +51,15 @@ class PatchSuggestedEvent(TypedDict):
     suggestions: List[PatchSuggestion]
     timestamp: str
 
-# Added missing DeploymentStatusEvent definition
+# Added missing DeploymentRequestEvent definition
+class DeploymentRequestEvent(TypedDict):
+    event_type: str  # "DeploymentRequestEvent"
+    request_id: str  # Unique ID for this request
+    project_id: str
+    deployment_target: Optional[str]  # Target environment (e.g., staging, production)
+    parameters: Optional[Dict[str, Any]]  # Optional deployment configurations
+    timestamp: str
+
 class DeploymentStatusEvent(TypedDict):
     event_type: str # "DeploymentStatusEvent"
     deployment_id: str # Unique ID for the deployment
@@ -59,140 +67,13 @@ class DeploymentStatusEvent(TypedDict):
     commit_sha: Optional[str]
     status: str # e.g., 'PENDING', 'IN_PROGRESS', 'SUCCESS', 'FAILED', 'CANCELLED'
     message: Optional[str] # Optional status message
-    details: Optional[Dict[str, Any]] # Optional details about the deployment status
+    details: Optional[Dict[str, Any]] # Optional deployment details
     timestamp: str
 
-
-class PipelineGenerationRequest(TypedDict):
-    event_type: str  # "PipelineGenerationRequest"
-    request_id: str  # Unique ID for this request
-    user_prompt: str # Natural language prompt describing the pipeline
-    project_id: Optional[str]
-    context: Optional[Dict[str, Any]] # Any additional context for the LLM
-    timestamp: str
-
-class DagNode(TypedDict):
-    id: str          # Unique ID for the node/task within the DAG
-    task_type: str   # e.g., 'lint', 'test', 'build', 'deploy', 'custom_script'
-    command: Optional[List[str]] # Actual command for task-runner if simple
-    agent_handler: Optional[str] # Which agent should handle this node if not a simple command
-    params: Optional[Dict[str, Any]]
-    dependencies: List[str] # List of other node IDs this node depends on
-
-class DagDefinition(TypedDict):
-    dag_id: str
-    project_id: Optional[str]
-    nodes: List[DagNode]
-    # Could add metadata like description, trigger conditions, etc.
-
-class DagDefinitionCreatedEvent(TypedDict):
-    event_type: str  # "DagDefinitionCreatedEvent"
-    request_id: str  # Corresponds to the PipelineGenerationRequest
-    project_id: Optional[str]
-    dag: DagDefinition
-    raw_llm_response: Optional[str] # For audit/debugging
-    timestamp: str
-
-
-class NewArtifactEvent(TypedDict):
-    event_type: str # "NewArtifactEvent"
-    event_id: str
-    project_id: str
-    commit_sha: Optional[str]
-    artifact_name: str # e.g., Docker image name, file name
-    artifact_type: str # e.g., "docker_image", "python_wheel", "terraform_plan"
-    artifact_location: str # e.g., "registry/image:tag", "s3://bucket/path", "/path/to/artifact_in_container"
-    timestamp: str
-
-class SecurityFinding(TypedDict):
-    finding_id: str # A unique ID for the finding, perhaps from the tool
-    rule_id: Optional[str] # e.g., Bandit rule ID, CVE ID
-    severity: str # 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL'
-    description: str
-    file_path: Optional[str]
-    line_number: Optional[int]
-    code_snippet: Optional[str] # Snippet of vulnerable code/config
-    remediation: Optional[str]
-    tool_name: str
-
-class SecurityScanResultEvent(TypedDict):
-    event_type: str # "SecurityScanResultEvent"
-    triggering_event_id: str # ID of the event that triggered the scan
-    project_id: str
-    commit_sha: Optional[str]
-    artifact_name: Optional[str] # If scan was on an artifact
-    scan_type: str # e.g., "SAST", "SCA_PYTHON", "IAC_TERRAFORM", "CONTAINER_IMAGE"
-    tool_name: str
-    status: str # 'SUCCESS', 'FAILED_TO_SCAN', 'COMPLETED_WITH_FINDINGS', 'COMPLETED_CLEAN'
-    findings: List[SecurityFinding]
-    summary: Optional[str] # e.g., "Found 5 high, 2 medium vulnerabilities"
-    scan_duration_seconds: Optional[float]
-    timestamp: str
-
-
-class AuditLogEntry(TypedDict):
-    event_type: str      # "AuditEvent"
-    audit_id: str        # Unique ID for this audit log
-    timestamp: str       # ISO datetime of when the audit log was created
-    source_event_type: str # The type of event being audited
-    source_event_id: Optional[str] # ID of the original event, if available
-    service_name: Optional[str]    # Service/agent that emitted the original event
-    project_id: Optional[str]
-    commit_sha: Optional[str]
-    user_or_actor: Optional[str]    # User or system component responsible
-    action_taken: str              # Description of the action or event content
-    details: Dict[str, Any]        # Key details from the original event payload
-    policy_check_results: Optional[Dict[str, str]] # For future policy checks
-
-class SLAMetric(TypedDict):
-    metric_name: str     # e.g., "dag_execution_time", "task_failure_rate"
-    value: float
-    unit: str            # e.g., "seconds", "percentage"
-    project_id: Optional[str]
-    dag_id: Optional[str]
-    task_id: Optional[str]
-
-class SLAViolationEvent(TypedDict):
-    event_type: str      # "SLAViolationEvent"
-    alert_id: str
-    timestamp: str
-    sla_name: str
-    metric_name: str
-    observed_value: float
-    threshold_value: float
-    project_id: Optional[str]
-    details: str
-
-class GovernanceAlertEvent(TypedDict): # More generic than SLA violation
-    event_type: str      # "GovernanceAlertEvent"
-    alert_id: str
-    timestamp: str
-    alert_type: str      # e.g., "EthicalBoundaryCrossed", "PolicyViolation", "DataHandlingIssue"
-    severity: str        # 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'
-    description: str
-    context: Dict[str, Any] # Relevant data from the event that triggered the alert
-
-
-class ProprietaryAuditEvent(TypedDict): # Event published by private governance_bridge
-    event_type: str         # "ProprietaryAuditEvent"
-    audit_id: str           # Unique ID from the private system
-    timestamp: str          # ISO datetime from the private system
-    source_service: str     # e.g., "MCPController", "AlgorithmAgent" (from private stack)
-    actor: Optional[str]
-    action: str             # Description of the action being audited
-    data_payload: Dict[str, Any] # The core data/log being shared
-    signature: Optional[str]       # If it's a "signed log"
-    metadata: Optional[Dict[str, Any]]
-
-# Consider adding __all__ here if you want to explicitly control exports
-# __all__ = [
-#     "TestResult", "TestFailedEvent",
-#     "CodeNavSearchQuery", "CodeNavSearchResultItem", "CodeNavSearchResults",
-#     "PatchSuggestion", "PatchSuggestedEvent",
-#     "DeploymentStatusEvent",
-#     "PipelineGenerationRequest", "DagNode", "DagDefinition", "DagDefinitionCreatedEvent",
-#     "NewArtifactEvent", "SecurityFinding", "SecurityScanResultEvent",
-#     "AuditLogEntry", "SLAMetric", "SLAViolationEvent", "GovernanceAlertEvent",
-#     "ProprietaryAuditEvent",
-#     # Add all other TypedDict names you want to be importable
-# ]
+# Ensure all relevant event types are included
+__all__ = [
+    "TestResult", "TestFailedEvent",
+    "CodeNavSearchQuery", "CodeNavSearchResultItem", "CodeNavSearchResults",
+    "PatchSuggestion", "PatchSuggestedEvent",
+    "DeploymentRequestEvent", "DeploymentStatusEvent"
+]
