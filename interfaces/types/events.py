@@ -212,6 +212,16 @@ class CodeNavSearchQuery(TypedDict):
     project_id: str
     limit: Optional[int]
     filters: Optional[Dict[str, Any]]  # e.g., {"file_extension": ".py"}
+class CodeNavSearchResultItem(TypedDict):
+    file_path: str
+    snippet: str  # or code_chunk
+    score: float
+    metadata: Optional[Dict[str, Any]]
+
+class CodeNavSearchResults(TypedDict):
+    event_type: str  # "CodeNavSearchResults"
+    query_id: str  # Correlates with the original search query
+    results: List[CodeNavSearchResultItem]
 
 # Ensure all event types are included in __all__
 __all__ = [
