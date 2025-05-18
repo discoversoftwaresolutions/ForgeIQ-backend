@@ -13,7 +13,7 @@ from .events import (
     NewCommitEvent, FileChange, AffectedTasksIdentifiedEvent,
     NewArtifactEvent, SecurityFinding, SecurityScanResultEvent,
     AuditLogEntry, SLAMetric, SLAViolationEvent, GovernanceAlertEvent,
-    DeploymentRequestEvent, DeploymentStatusEvent,interfacesevents
+    DeploymentRequestEvent, DeploymentStatusEvent,InterfacesEvents
 )
 
 from .common import Status, Timestamped # Assuming common.py for these
