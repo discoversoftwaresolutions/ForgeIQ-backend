@@ -2,14 +2,16 @@ import os
 import logging
 from typing import Dict, Any, Optional
 
+# Initialize logger
 logger = logging.getLogger(__name__)
 
-WEAVIATE_URL = os.getenv("WEAVIATE_URL")  # ✅ Ensure this is properly aligned
-    WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY") # Optional: for Weaviate Cloud API key auth
-    
-    # Define standard class name for code snippets, can be overridden
-    CODE_SNIPPET_CLASS_NAME = "CodeSnippet" 
-    DEFAULT_VECTOR_SEARCH_LIMIT = 10
+# Weaviate configuration variables
+WEAVIATE_URL = os.getenv("WEAVIATE_URL")  # ✅ Properly aligned
+WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")  # Optional: for Weaviate Cloud API key authentication
+
+# Define standard class name for code snippets (can be overridden)
+CODE_SNIPPET_CLASS_NAME = "CodeSnippet"
+DEFAULT_VECTOR_SEARCH_LIMIT = 10
 
     class VectorStoreClient:
         def __init__(self, weaviate_url: Optional[str] = None, api_key: Optional[str] = None):
