@@ -1,6 +1,7 @@
 # =======================
 # 📁 core/__init__.py
 # =======================
+import logging
 
 # --- Event Bus ---
 from .event_bus.redis_bus import EventBus, message_summary
