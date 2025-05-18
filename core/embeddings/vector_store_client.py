@@ -3,6 +3,10 @@ import logging
 from typing import Dict, Any, Optional, List, Union
 import weaviate
 
+# Define constant for code snippets
+CODE_SNIPPET_CLASS_NAME = "CodeSnippet"
+
+# Declare exported
 # Initialize logger
 logger = logging.getLogger(__name__)
 
