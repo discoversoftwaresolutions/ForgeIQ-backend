@@ -1,6 +1,6 @@
 # ... (existing exports) ...
 from .events import (
-    DeploymentRequestEvent, DeploymentStatusEvent
+    DeploymentStatusEvent
 )
 
 __all__ = [
