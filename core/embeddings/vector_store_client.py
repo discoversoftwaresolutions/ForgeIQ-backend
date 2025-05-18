@@ -1,6 +1,10 @@
+import os
+import logging
+from typing import Dict, Any, Optional
+
 logger = logging.getLogger(__name__)
 
-    WEAVIATE_URL = os.getenv("WEAVIATE_URL")
+WEAVIATE_URL = os.getenv("WEAVIATE_URL")  # ✅ Ensure this is properly aligned
     WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY") # Optional: for Weaviate Cloud API key auth
     
     # Define standard class name for code snippets, can be overridden
