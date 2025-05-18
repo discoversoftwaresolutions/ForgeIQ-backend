@@ -2,9 +2,15 @@
 # 📁 core/build-graph/index.py
 # ===============================
 
-from typing import List, Dict
-import hashlib
-import os
+from typing import Dict, List
+
+PROJECT_GRAPH: Dict[str, List[str]] = {
+    "debugiq-core": ["lint", "test", "build", "deploy"],
+    "forgeiq": ["lint", "build", "deploy"],
+}
+
+def get_project_dag(project: str) -> List[str]:
+    return PROJECT_GRAPH.get(project, [])
 
 # Simulated file mapping to tasks (normally generated via heuristics or manifest)
 FILE_TASK_MAP = {
