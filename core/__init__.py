@@ -2,6 +2,7 @@
 # 📁 core/__init__.py
 # =======================
 import logging
+from typing import List  
 
 # --- Event Bus ---
 from .event_bus.redis_bus import EventBus, message_summary
