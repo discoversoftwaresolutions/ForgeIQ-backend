@@ -1,57 +1,53 @@
-# ===================================
-# 📁 /app/interfaces/__init__.py
-# ===================================
+# ==================================
+# 📁 interfaces/types/__init__.py
+# ==================================
 
-# Assuming event definitions are in interfaces/types/events.py
-# Correct the import path to reference the 'types' submodule
-from .types.events import (
+# Corrected line - removed invalid comment syntax
+from .events import (
     TestResult, TestFailedEvent,
     CodeNavSearchQuery, CodeNavSearchResultItem, CodeNavSearchResults,
     PatchSuggestion, PatchSuggestedEvent,
-    DeploymentStatusEvent, # Add other specific events needed at this level
-    DeploymentRequestEvent,
-    PipelineGenerationUserPrompt, PipelineGenerationRequestEvent,
-    DagDefinitionCreatedEvent,
+    # Add other specific events defined in ./events.py that you want to export from interfaces.types
+    PipelineGenerationUserPrompt, PipelineGenerationRequestEvent, DagDefinitionCreatedEvent,
     TaskStatus, TaskStatusUpdateEvent, DagExecutionStatusEvent,
     NewCommitEvent, FileChange, AffectedTasksIdentifiedEvent,
     NewArtifactEvent, SecurityFinding, SecurityScanResultEvent,
     AuditLogEntry, SLAMetric, SLAViolationEvent, GovernanceAlertEvent,
+    DeploymentRequestEvent, DeploymentStatusEvent,
 )
 
-# You may also want to expose other types defined within the 'types' submodule
-from .types.common import Status, Timestamped
-from .types.agent import AgentCapability, AgentEndpoint, AgentRegistrationInfo
-from .types.cache import (
-    CacheKeyParams, CachedItemMetadata, CacheGetResponse,
-    CacheStoreRequest, CacheStoreResponse
-)
-from .types.graph import DagNode, DagDefinition
-from .types.task import TaskInfo, TaskExecutionRequest, TaskExecutionResult
+from .common import Status, Timestamped # Assuming common.py for these
+from .agent import AgentCapability, AgentEndpoint, AgentRegistrationInfo
+from .cache import CacheKeyParams, CachedItemMetadata, CacheGetResponse, CacheStoreRequest, CacheStoreResponse
+from .graph import DagNode, DagDefinition # Moving these here
+from .task import TaskInfo, TaskExecutionRequest, TaskExecutionResult # New task types
 
 
 __all__ = [
-    # Re-exporting types from the 'types' submodule
+    # Common
     "Status", "Timestamped",
+    # Agent
     "AgentCapability", "AgentEndpoint", "AgentRegistrationInfo",
+    # Cache
     "CacheKeyParams", "CachedItemMetadata", "CacheGetResponse",
     "CacheStoreRequest", "CacheStoreResponse",
+    # Graph
     "DagNode", "DagDefinition",
-    "TaskInfo", "TaskExecutionRequest", "TaskExecutionResult",
-
-    # Re-exporting specific events from interfaces.types.events
-    "TestResult", "TestFailedEvent",
+    # Task
+    "TaskInfo", "TaskExecutionRequest", "TaskExecutionResult", # New
+    # Events (alphabetical for easier management) - Ensure these are imported above
+    "AffectedTasksIdentifiedEvent",
+    "AuditLogEntry",
     "CodeNavSearchQuery", "CodeNavSearchResultItem", "CodeNavSearchResults",
+    "DagDefinitionCreatedEvent", "DagExecutionStatusEvent",
+    "DeploymentRequestEvent", "DeploymentStatusEvent",
+    "FileChange",
+    "GovernanceAlertEvent",
+    "NewArtifactEvent", "NewCommitEvent",
     "PatchSuggestion", "PatchSuggestedEvent",
-    "DeploymentStatusEvent",
-    "DeploymentRequestEvent",
     "PipelineGenerationUserPrompt", "PipelineGenerationRequestEvent",
-    "DagDefinitionCreatedEvent",
-    "TaskStatus", "TaskStatusUpdateEvent", "DagExecutionStatusEvent",
-    "NewCommitEvent", "FileChange", "AffectedTasksIdentifiedEvent",
-    "NewArtifactEvent", "SecurityFinding", "SecurityScanResultEvent",
-    "AuditLogEntry", "SLAMetric", "SLAViolationEvent", "GovernanceAlertEvent",
+    "SLAMetric", "SLAViolationEvent",
+    "SecurityFinding", "SecurityScanResultEvent",
+    "TaskStatus", "TaskStatusUpdateEvent",
+    "TestFailedEvent", "TestResult",
 ]
-
-# Note: The __all__ list should include all names you want to make available
-# when someone does 'from interfaces import *'.
-# Ensure all names imported above that you want to export are in __all__.
