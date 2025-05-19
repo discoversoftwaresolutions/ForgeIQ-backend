@@ -30,7 +30,8 @@ PYTHON_STRUCTURE_PATTERNS = [
 ]
 # Max lines for a recognized Python function/class chunk
 MAX_LINES_PER_STRUCTURED_CHUNK_PYTHON = 300
-
+def scan_code_directory(path: str) -> list: return []
+def get_language_from_extension(file_path: str) -> Optional[str]: return None
 
 def get_language_from_extension(file_path: str) -> Optional[str]:
     # (Same as previously defined in CodeNavAgent's parser)
