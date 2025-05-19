@@ -1,5 +1,5 @@
 # ====================================
-# 📁 apps/agent-cli/main.py
+# 📁 app/agent-cli/main.py
 # ====================================
 import typer
 import logging
