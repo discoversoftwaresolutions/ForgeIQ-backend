@@ -119,3 +119,9 @@ class MCPStrategyApiResponse(BaseModel):
     status: str
     message: Optional[str] = None
     strategy_details: Optional[MCPStrategyApiDetails] = None
+from typing import TypedDict, List, Dict, Any
+
+class SDKAlgorithmContext(TypedDict):
+    project_id: str
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
