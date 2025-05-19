@@ -1,1 +1,2 @@
-__all__ = ["BeforeDeployHook", "HookManager"]
+from .hook_manager import HookManager
+__all__ = ["HookManager"]
