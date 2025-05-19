@@ -3,13 +3,13 @@ version: '3.9'
 services:
   forgeiq-backend:
     build:
-      context: ./apps/forgeiq-backend
+      context: ./app/forgeiq-backend
     ports:
       - "8000:8000"
 
   forgeiq-frontend:
     build:
-      context: ./apps/forgeiq-frontend
+      context: ./app/forgeiq-frontend
     ports:
       - "8501:8501"
     depends_on:
