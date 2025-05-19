@@ -1,5 +1,5 @@
 # =======================================================
-# 📁 agents/DependencyAgent/app/agent.py (V0.2 - CABGP)
+# 📁 agents/DependencyAgent/agent.py (V0.2 - CABGP)
 # =======================================================
 import os
 import json
