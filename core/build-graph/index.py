@@ -1,7 +1,7 @@
 # ===============================
 # 📁 core/build-graph/index.py
 # ===============================
-
+from core.build_graph import get_project_dag, PROJECT_GRAPH
 from typing import Dict, List
 
 PROJECT_GRAPH: Dict[str, List[str]] = {
