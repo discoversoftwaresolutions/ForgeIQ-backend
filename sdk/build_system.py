@@ -1,5 +1,6 @@
 import logging
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
+from sdk.models import SDKAlgorithmContext  # ✅ Ensure this exists
 
 if TYPE_CHECKING:
     from .client import ForgeIQClient  # ✅ Prevent circular imports
