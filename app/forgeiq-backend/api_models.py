@@ -1,5 +1,5 @@
 # ================================================
-# 📁 apps/forgeiq-backend/api_models.py
+# 📁 app/forgeiq-backend/api_models.py
 # ================================================
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
