@@ -1,9 +1,5 @@
-# ===============================
-# 📁 core/build_graph/index.py
-# ===============================
 from typing import Dict, List
 import hashlib  # ✅ Required for hash_file
-from core.build_graph.index import get_project_dag, PROJECT_GRAPH
 
 # --- Project Graph ---
 PROJECT_GRAPH: Dict[str, List[str]] = {
