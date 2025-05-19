@@ -3,7 +3,7 @@
 # =================================
 import logging
 from typing import Optional, Dict, Any, List
-
+from .build_system import BuildSystemClient
 # To use ForgeIQClient for making requests, it needs to be imported.
 # This assumes client.py is in the same sdk package.
 # from .client import ForgeIQClient # If used directly
