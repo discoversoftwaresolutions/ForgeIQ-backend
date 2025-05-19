@@ -14,7 +14,7 @@ WORKDIR /app
 # Ensures Python output is sent straight to terminal without being buffered first
 ENV PYTHONUNBUFFERED=1
 # Adds the /app directory (monorepo root inside container) to PYTHONPATH
-# so Python can find your core, interfaces, shared, and apps packages
+# so Python can find your core, interfaces, shared, and app packages
 ENV PYTHONPATH=/app
 
 # Install system dependencies that might be needed by your Python packages
@@ -35,10 +35,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of your monorepo's code into the /app directory in the image.
-# This includes the 'apps/forgeiq-backend/app/main.py' and any 'core',
+# This includes the 'app/forgeiq-backend/app/main.py' and any 'core',
 # 'interfaces', 'shared' Python modules it depends on.
 # Using "COPY . ." is simple but copies everything. For production, you might
-# selectively COPY only necessary directories (e.g., COPY apps /app/apps, COPY core /app/core)
+# selectively COPY only necessary directories (e.g., COPY app/app, COPY core /app/core)
 # However, with Railway's Watch Paths, `COPY . .` is often manageable.
 COPY . .
 
@@ -49,7 +49,7 @@ EXPOSE 8000
 
 # Command to run your FastAPI application using Uvicorn.
 # This tells Uvicorn to:
-#   - Find the 'app' instance (your FastAPI app) in the Python module 'apps.forgeiq-backend.app.main'.
+#   - Find the 'app' instance (your FastAPI app) in the Python module 'app.forgeiq-backend.app.main'.
 #   - Listen on all available network interfaces within the container (0.0.0.0).
 #   - Listen on port 8000 inside the container.
-CMD ["uvicorn", "apps.forgeiq-backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.forgeiq-backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
