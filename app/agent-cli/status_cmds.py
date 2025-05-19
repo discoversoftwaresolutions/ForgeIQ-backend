@@ -1,5 +1,5 @@
 # ================================================
-# 📁 apps/agent-cli/app/commands/status_cmds.py
+# 📁 app/agent-cli/commands/status_cmds.py
 # ================================================
 import typer
 import asyncio # Typer uses this for async commands
