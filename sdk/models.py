@@ -1,7 +1,22 @@
 from typing import TypedDict, List, Dict, Any, Optional
 from pydantic import BaseModel, Field  # ✅ Fix: Ensure `Field` is available
+from typing import TypedDict, Dict, Any, List
+
+class SDKAlgorithmContext(TypedDict):
+    project_id: str
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
 
 # --- File Change Representation ---
+from typing import TypedDict, Dict, Any, List
+
+class SDKAlgorithmContext(TypedDict):
+    project_id: str
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
+
+
+
 class SDKFileChange(TypedDict):
     file_path: str
     change_type: str 
@@ -116,3 +131,9 @@ class MCPStrategyApiResponse(BaseModel):
     status: str
     message: Optional[str] = None
     strategy_details: Optional[MCPStrategyApiDetails] = None
+from typing import TypedDict, Dict, Any, List
+
+class SDKAlgorithmContext(TypedDict):
+    project_id: str
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
