@@ -1,5 +1,5 @@
 # ==============================================
-# 📁 apps/agent-cli/app/sdk_client_factory.py
+# 📁 app/agent-cli/sdk_client_factory.py
 # ==============================================
 import logging
 import os # Though not directly used here, often useful in config/factory patterns
