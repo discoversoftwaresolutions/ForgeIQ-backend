@@ -51,7 +51,7 @@ asyncio_mode = "auto"
 # Configure PYTHONPATH for pytest to correctly find your project's modules
 pythonpath = [
   ".",        # Adds the monorepo root to Python's path
-  "apps",     
+  "app",     
   "agents",   
   "core",     
   "interfaces",
