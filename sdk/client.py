@@ -295,5 +295,10 @@ class ForgeIQClient:
             if isinstance(e, ForgeIQSDKError):
                 raise
             raise ForgeIQSDKError(f"Failed to apply algorithm '{algorithm_id}': {str(e)}") from e
+from typing import TypedDict, List, Dict, Any
 
+class SDKAlgorithmContext(TypedDict):
+    project_id: str
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
     # ... (other existing SDK methods like submit_pipeline_prompt, generate_code_via_api, etc.) ...
