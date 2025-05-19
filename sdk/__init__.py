@@ -1,12 +1,12 @@
 import logging
 from typing import TYPE_CHECKING
 
-# ✅ Prevent circular import issues
+# ✅ Prevent circular imports by delaying initialization
 if TYPE_CHECKING:
-    from .models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
+    from .build_system import BuildSystemClient
+    from .models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse  # ✅ Keep only if needed
 
 # --- Client Imports ---
-from .build_system import BuildSystemClient
 from .client import ForgeIQClient
 from .exceptions import ForgeIQSDKError, APIError, AuthenticationError, NotFoundError, RequestTimeoutError
 
@@ -23,9 +23,8 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 from .debugiq_sdk import DebugIQClient
 from .codenav_sdk import CodeNavSDKClient
 
-# --- Define __all__ explicitly ---
+# --- Define `__all__` explicitly ---
 __all__ = [
-    "BuildSystemClient",
     "ForgeIQClient",
     "ForgeIQSDKError",
     "APIError",
