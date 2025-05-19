@@ -28,7 +28,7 @@ from .codenav_sdk import CodeNavSDKClient
 
 # --- Define __all__ explicitly ---
 __all__ = [
-    "BuildSystemClient",
+    
     "ForgeIQClient",
     "ForgeIQSDKError",
     "APIError",
