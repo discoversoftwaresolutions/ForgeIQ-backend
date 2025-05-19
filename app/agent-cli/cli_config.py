@@ -1,5 +1,5 @@
 # ========================================
-# 📁 apps/agent-cli/app/cli_config.py
+# 📁 app/agent-cli/cli_config.py
 # ========================================
 import os
 import logging
