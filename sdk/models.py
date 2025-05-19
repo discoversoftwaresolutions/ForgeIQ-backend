@@ -1,8 +1,6 @@
-# ======================
-# 📁 sdk/models.py
-# ======================
+
 from typing import TypedDict, List, Dict, Any, Optional
-from pydantic import BaseModel  # ✅ Fixes NameError
+from pydantic import BaseModel  
 class SDKFileChange(TypedDict):
     file_path: str
     change_type: str 
