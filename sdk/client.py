@@ -4,6 +4,7 @@ import httpx
 import logging
 import uuid
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
+from sdk.models import SDKAlgorithmContext  # ✅ Ensure this is correct
 
 # ✅ Prevent circular imports by delaying initialization
 if TYPE_CHECKING:
@@ -145,3 +146,10 @@ class ForgeIQClient:
         payload = {"current_dag_info": current_dag_info}
         logger.info(f"SDK: Requesting MCP build strategy optimization for project '{project_id}'")
         return await self._request("POST", endpoint, json_data=payload)
+from typing import TypedDict, List, Dict, Any
+
+class SDKAlgorithmContext(TypedDict):
+    """Defines the request structure for proprietary algorithm execution."""
+    project_id: str
+    dag_representation: List[Any]
+    telemetry_data: Dict[str, Any]
