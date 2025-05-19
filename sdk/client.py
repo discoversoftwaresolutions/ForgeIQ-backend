@@ -5,6 +5,7 @@ import logging
 import uuid
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 from sdk.models import SDKAlgorithmContext  # ✅ Ensure this is correct
+from sdk.models import SDKOptimizedAlgorithmResponse  # ✅ Ensure this is correct
 
 # ✅ Prevent circular imports by delaying initialization
 if TYPE_CHECKING:
