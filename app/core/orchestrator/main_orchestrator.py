@@ -7,26 +7,30 @@ import asyncio
 import logging
 import uuid
 import datetime
-import time # For _wait_for_event
+import time  # For _wait_for_event
 from typing import Dict, Any, Optional, List
 from sdk.models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
 
 # --- Observability Setup ---
 SERVICE_NAME_ORCHESTRATOR = "Orchestrator"
 LOG_LEVEL_ORCHESTRATOR = os.getenv("LOG_LEVEL", "INFO").upper()
+
 logging.basicConfig(
     level=LOG_LEVEL_ORCHESTRATOR,
     format=f'%(asctime)s - {SERVICE_NAME_ORCHESTRATOR} - %(name)s - %(levelname)s - %(message)s'
 )
-_tracer = None 
+
+_tracer = None
 _trace_api = None
+
 try:
     from opentelemetry import trace as otel_trace_api
     from core.observability.tracing import setup_tracing
     _tracer = setup_tracing(SERVICE_NAME_ORCHESTRATOR)
     _trace_api = otel_trace_api
-except ImportError:
-    logging.getLogger(SERVICE_NAME_ORCHESTRATOR).warning("Orchestrator: Tracing setup failed.")
+except ImportError as e:
+    logging.warning(f"Orchestrator: Tracing setup failed. Error: {e}", exc_info=True)
+
 logger = logging.getLogger(__name__)
 # --- End Observability Setup ---
 
@@ -36,10 +40,10 @@ from core.shared_memory import SharedMemoryStore
 from core.message_router import MessageRouter, MessageRouteNotFoundError, InvalidMessagePayloadError
 
 from interfaces.types.events import (
-    FileChange, NewCommitEvent, # For run_full_build_flow
-    PipelineGenerationRequestEvent, PipelineGenerationUserPrompt, # For BuildSurf via MessageRouter
-    DagDefinition, DagDefinitionCreatedEvent, DagExecutionStatusEvent, # For PlanAgent interaction
-    DeploymentRequestEvent, DeploymentStatusEvent, # For CI_CD_Agent via MessageRouter
+    FileChange, NewCommitEvent,  # For run_full_build_flow
+    PipelineGenerationRequestEvent, PipelineGenerationUserPrompt,  # For BuildSurf via MessageRouter
+    DagDefinition, DagDefinitionCreatedEvent, DagExecutionStatusEvent,  # For PlanAgent interaction
+    DeploymentRequestEvent, DeploymentStatusEvent,  # For CI_CD_Agent via MessageRouter
     AffectedTasksIdentifiedEvent, SecurityScanResultEvent
 )
 from interfaces.types.orchestration import OrchestrationFlowState
@@ -47,23 +51,23 @@ from interfaces.types.orchestration import OrchestrationFlowState
 # Import SDK client and relevant request/response models for code generation
 try:
     from sdk.client import ForgeIQClient
-    # Assuming CodeGenerationPrompt is a Pydantic model in ForgeIQ-backend's api_models
-    # and SDK might use TypedDicts or its own Pydantic models.
-    # For this example, we'll use the structure from ForgeIQ-backend's api_models.py
-    # These imports are for type hinting what the Orchestrator expects to pass to SDK
-    from apps.forgeiq_backend.app.api_models import CodeGenerationPrompt, CodeGenerationResponse, GeneratedCodeOutput
+    from apps.forgeiq_backend.app.api_models import (
+        CodeGenerationPrompt, CodeGenerationResponse, GeneratedCodeOutput
+    )
 except ImportError as e_sdk:
     logger.error(f"Orchestrator: Failed to import ForgeIQ SDK or its models: {e_sdk}. Code generation flow will be impacted.", exc_info=True)
-    ForgeIQClient = None # type: ignore
-    CodeGenerationPrompt = None # type: ignore
-    CodeGenerationResponse = None # type: ignore
-from sdk.models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
-DEFAULT_EVENT_TIMEOUT = int(os.getenv("ORCHESTRATOR_EVENT_TIMEOUT_SECONDS", "300")) # 5 minutes
+    ForgeIQClient = None  # type: ignore
+    CodeGenerationPrompt = None  # type: ignore
+    CodeGenerationResponse = None  # type: ignore
 
-FLOW_STATE_EXPIRY_SECONDS = int(os.getenv("ORCHESTRATOR_FLOW_STATE_EXPIRY_SECONDS", 24 * 60 * 60)) # 1 day
+# --- Configuration Defaults ---
+DEFAULT_EVENT_TIMEOUT = int(os.getenv("ORCHESTRATOR_EVENT_TIMEOUT_SECONDS", 300))  # 5 minutes
+FLOW_STATE_EXPIRY_SECONDS = int(os.getenv("ORCHESTRATOR_FLOW_STATE_EXPIRY_SECONDS", 24 * 60 * 60))  # 1 day
 
+# --- Custom Exception ---
 class OrchestrationError(Exception):
     """Custom exception for orchestration failures."""
+
     def __init__(self, message: str, flow_id: Optional[str] = None, stage: Optional[str] = None):
         super().__init__(message)
         self.flow_id = flow_id
@@ -73,29 +77,30 @@ class OrchestrationError(Exception):
     def __str__(self):
         return f"OrchestrationError (Flow: {self.flow_id}, Stage: {self.stage}): {self.message}"
 
-
+# --- Orchestrator Class ---
 class Orchestrator:
     def __init__(self, 
                  agent_registry: AgentRegistry, 
                  event_bus: EventBus, 
                  shared_memory: SharedMemoryStore,
                  message_router: MessageRouter,
-                 forgeiq_sdk_client: Optional[ForgeIQClient] = None # Pass initialized client
-                ):
+                 forgeiq_sdk_client: Optional[ForgeIQClient] = None):
+        """Initializes the Orchestrator."""
         logger.info("Initializing Orchestrator (V0.3 with Code Generation Flow)...")
+        
         self.agent_registry = agent_registry
-        self.event_bus = event_bus 
+        self.event_bus = event_bus
         self.shared_memory = shared_memory
         self.message_router = message_router
-        self.forgeiq_sdk_client = forgeiq_sdk_client # Store the SDK client
+        self.forgeiq_sdk_client = forgeiq_sdk_client
 
-        if not all([self.event_bus.redis_client, 
-                    self.shared_memory.redis_client, 
-                    self.message_router,
-                    self.agent_registry]): # Added agent_registry check
-             logger.error("Orchestrator critical: One or more core services are not properly initialized.")
+        # Validate core dependencies
+        failed_services = [svc for svc in ["event_bus", "shared_memory", "message_router", "agent_registry"] if not getattr(self, svc)]
+        if failed_services:
+            logger.error(f"Orchestrator critical: Missing core services -> {failed_services}")
 
-        if not self.forgeiq_sdk_client and ForgeIQClient is not None: # Check if class was imported
+        # Validate SDK client initialization
+        if not self.forgeiq_sdk_client and ForgeIQClient is not None:
             logger.warning("Orchestrator: ForgeIQ SDK client not provided during initialization. Code generation flow will fail if attempted.")
         elif ForgeIQClient is None:
             logger.error("Orchestrator: ForgeIQClient class could not be imported. Code generation flow is unavailable.")
@@ -103,7 +108,13 @@ class Orchestrator:
         logger.info("Orchestrator V0.3 Initialized.")
 
     def _start_trace_span_if_available(self, operation_name: str, parent_context: Optional[Any] = None, **attrs):
-        # ... (same helper as before) ...
+        """Helper method for tracing integration."""
+        if _tracer and _trace_api:
+            with _tracer.start_as_current_span(operation_name) as span:
+                for key, value in attrs.items():
+                    span.set_attribute(key, value)
+                return span
+        return None
         if _tracer and _trace_api:
             span = _tracer.start_span(f"orchestrator.{operation_name}", context=parent_context)
             for k,v_attr in attrs.items(): span.set_attribute(k, v_attr) # Use different var name
