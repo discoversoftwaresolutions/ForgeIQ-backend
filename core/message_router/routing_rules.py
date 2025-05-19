@@ -4,6 +4,6 @@ ROUTING_RULES = {
     "cache_lookup": "cache_service.fetch_item",
 }
 
-def get_routing_target(route_name: str) Optional[str]:
-    """Returns the target function for a given route, if defined."""
+def get_routing_target(route_name: str) -> Optional[str]:
+    return None  # Replace with actual logic
     return ROUTING_RULES.get(route_name)
