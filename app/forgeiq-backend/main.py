@@ -1,5 +1,5 @@
 # =====================================================================
-# 📁 forgeiq-backend/main.py (V0.5 - Auth & Dependency Injection)
+# 📁 app/forgeiq-backend/main.py (V0.5 - Auth & Dependency Injection)
 # =====================================================================
 import os
 import json
