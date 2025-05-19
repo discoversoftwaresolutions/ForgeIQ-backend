@@ -1,11 +1,12 @@
-# =======================
-# 📁 sdk/__init__.py
-# =======================
+import logging
+from typing import TYPE_CHECKING
 
-import logging  # Good practice to configure a null handler for library logs by default
+# ✅ Prevent circular imports by delaying initialization
+if TYPE_CHECKING:
+    from .build_system import BuildSystemClient
+    from .models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
 
 # --- Client Imports ---
-from .build_system import BuildSystemClient  # ✅ Fixed spacing issue
 from .client import ForgeIQClient
 from .exceptions import ForgeIQSDKError, APIError, AuthenticationError, NotFoundError, RequestTimeoutError
 
@@ -16,8 +17,6 @@ from .models import (
 )
 
 # Configure a null handler for the library's root logger
-# This prevents a "No handler found" warning if the consuming application
-# doesn't configure logging, while still allowing the app to set up its own handlers.
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 # --- Additional SDK Clients ---
@@ -25,10 +24,8 @@ from .debugiq_sdk import DebugIQClient
 from .codenav_sdk import CodeNavSDKClient
 # from .agent_client import GenericAgentClient  # Uncomment if needed
 
-
 # --- Define __all__ explicitly ---
 __all__ = [
-    
     "ForgeIQClient",
     "ForgeIQSDKError",
     "APIError",
@@ -43,6 +40,4 @@ __all__ = [
     "SDKFileChange",
     "DebugIQClient",
     "CodeNavSDKClient",
-    "SDKMCPStrategyRequestContext",
-    "SDKMCPStrategyResponse",
 ]
