@@ -404,7 +404,7 @@ async def mcp_optimize_strategy_endpoint(
             logger.error(err_msg, exc_info=True)
             if _trace_api and span: span.record_exception(e_call); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "MCP call failed"))
             raise HTTPException(status_code=500, detail=f"Internal error while calling MCP service: {str(e_call)}")
-# In apps/forgeiq-backend/app/main.py
+# In app/forgeiq-backend/app/main.py
 # ... (existing imports, including private_intel_http_client and get_private_intel_client) ...
 from .api_models import ApplyAlgorithmRequest, ApplyAlgorithmResponse # Add these
 
