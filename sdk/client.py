@@ -7,7 +7,7 @@ import httpx
 import logging
 import uuid
 from typing import Optional, Dict, Any, List
-
+from sdk.models import SDKAlgorithmContext  # ✅ Ensure this exists
 from .exceptions import APIError, AuthenticationError, NotFoundError, RequestTimeoutError, ForgeIQSDKError
 from .models import SDKDagDefinition, SDKDagExecutionStatus, SDKDeploymentStatus 
 from .hooks import HookManager, DeployContext # <<< IMPORT HookManager and DeployContext
