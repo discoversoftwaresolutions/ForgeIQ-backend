@@ -125,3 +125,20 @@ class SDKAlgorithmContext(TypedDict):
     project_id: str
     dag_representation: List[Any]
     telemetry_data: Dict[str, Any]
+from typing import TypedDict, List, Dict, Any
+
+class SDKMCPStrategyRequestContext(TypedDict):
+    """Defines the request structure for an MCP strategy."""
+    project_id: str
+    current_dag_snapshot: List[Dict[str, Any]]
+    optimization_goal: str
+    additional_mcp_context: Dict[str, Any]
+
+class SDKMCPStrategyResponse(TypedDict):
+    """Defines the response structure for MCP strategy results."""
+    project_id: str
+    strategy_id: str
+    new_dag_definition: Dict[str, Any]
+    directives: List[str]
+    status: str
+    message: str
