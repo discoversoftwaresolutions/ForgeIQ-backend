@@ -1,8 +1,8 @@
-import logging
+import logging  # ✅ Standardized import placement
 
 # ✅ Ensure proper import from `main_orchestrator`
 try:
-    from .main_orchestrator import Orchestrator, OrchestrationError
+    from core.orchestrator.main_orchestrator import Orchestrator, OrchestrationError  # 🔹 Updated absolute import path
 except ModuleNotFoundError as e:
     logging.error(f"Orchestrator module could not be imported: {e}", exc_info=True)
     Orchestrator = None  # type: ignore
