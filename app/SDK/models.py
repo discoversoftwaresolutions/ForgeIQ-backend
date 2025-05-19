@@ -3,7 +3,7 @@
 # =======================
 from typing import TypedDict, List, Dict, Any, Optional
 from pydantic import BaseModel, Field  # ✅ Fix: Added missing Field import
-
+from sdk.models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
 # --- File Change Representation ---
 class SDKFileChange(TypedDict):
     file_path: str
