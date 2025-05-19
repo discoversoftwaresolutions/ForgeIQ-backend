@@ -1,9 +1,6 @@
-# =======================
-# 📁 sdk/models.py
-# =======================
 from typing import TypedDict, List, Dict, Any, Optional
-from pydantic import BaseModel, Field  # ✅ Fix: Added missing Field import
-from sdk.models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
+from pydantic import BaseModel, Field  # ✅ Fix: Ensure `Field` is available
+
 # --- File Change Representation ---
 class SDKFileChange(TypedDict):
     file_path: str
@@ -95,7 +92,7 @@ class OptimizeStrategyRequest(BaseModel):
 class OptimizedAlgorithmDetails(BaseModel):
     algorithm_reference: str
     benchmark_score: float
-    generated_code_or_dag: Optional[str]  # ✅ Fix: Added Optional
+    generated_code_or_dag: Optional[str]
 
 class OptimizeStrategyResponse(BaseModel):
     message: str
@@ -104,41 +101,18 @@ class OptimizeStrategyResponse(BaseModel):
 
 # --- MCP API Models ---
 class MCPStrategyApiRequest(BaseModel):
-    current_dag_snapshot: Optional[List[Dict[str, Any]]] = Field(default=None, description="Snapshot of the current DAG.")
-    optimization_goal: Optional[str] = Field(default=None, description="Optimization goal (e.g., 'reduce_cost').")
-    additional_mcp_context: Optional[Dict[str, Any]] = Field(default=None, description="Additional context.")
+    current_dag_snapshot: Optional[List[Dict[str, Any]]] = Field(None, description="Snapshot of the current DAG.")
+    optimization_goal: Optional[str] = Field(None, description="Optimization goal (e.g., 'reduce_cost').")
+    additional_mcp_context: Optional[Dict[str, Any]] = Field(None, description="Additional context.")
 
 class MCPStrategyApiDetails(BaseModel):
     strategy_id: Optional[str] = None
-    new_dag_definition_raw: Optional[Dict[str, Any]] = Field(default=None, description="Raw new DAG definition.")
+    new_dag_definition_raw: Optional[Dict[str, Any]] = Field(None, description="Raw new DAG definition.")
     directives: Optional[List[str]] = None
-    mcp_metadata: Optional[Dict[str, Any]] = Field(default=None, alias="mcpExecutionDetails")
+    mcp_metadata: Optional[Dict[str, Any]] = Field(None, alias="mcpExecutionDetails")
 
 class MCPStrategyApiResponse(BaseModel):
     project_id: str
     status: str
     message: Optional[str] = None
     strategy_details: Optional[MCPStrategyApiDetails] = None
-from typing import TypedDict, List, Dict, Any
-
-class SDKAlgorithmContext(TypedDict):
-    project_id: str
-    dag_representation: List[Any]
-    telemetry_data: Dict[str, Any]
-from typing import TypedDict, List, Dict, Any
-
-class SDKMCPStrategyRequestContext(TypedDict):
-    """Defines the request structure for an MCP strategy."""
-    project_id: str
-    current_dag_snapshot: List[Dict[str, Any]]
-    optimization_goal: str
-    additional_mcp_context: Dict[str, Any]
-
-class SDKMCPStrategyResponse(TypedDict):
-    """Defines the response structure for MCP strategy results."""
-    project_id: str
-    strategy_id: str
-    new_dag_definition: Dict[str, Any]
-    directives: List[str]
-    status: str
-    message: str
