@@ -159,7 +159,7 @@ class ForgeIQClient:
         logger.info(f"SDK: Getting deployment status for request ID '{deployment_request_id}'")
         response_data = await self._request("GET", endpoint)
         return SDKDeploymentStatus(**response_data)
-    ```
+    
 # In sdk/client.py, within ForgeIQClient class:
 # Ensure SDKAlgorithmContext and SDKOptimizedAlgorithmResponse are imported from .models
 
