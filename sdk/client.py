@@ -153,3 +153,11 @@ class SDKAlgorithmContext(TypedDict):
     project_id: str
     dag_representation: List[Any]
     telemetry_data: Dict[str, Any]
+from typing import TypedDict, Optional
+
+class SDKOptimizedAlgorithmResponse(TypedDict):
+    """Defines the response structure for build strategy optimization."""
+    algorithm_reference: str
+    benchmark_score: float
+    generated_code_or_dag: Optional[str]
+    message: Optional[str]
