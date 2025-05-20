@@ -124,3 +124,11 @@ class ApplyAlgorithmResponse(BaseModel):
     status: str
     result: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
+from pydantic import BaseModel
+from typing import Dict, Any, Optional
+
+class MCPStrategyApiRequest(BaseModel):
+    """Defines request structure for MCP strategy optimization."""
+    current_dag_snapshot: Dict[str, Any]
+    optimization_goal: Optional[str] = None
+    additional_mcp_context: Optional[Dict[str, Any]] = None
