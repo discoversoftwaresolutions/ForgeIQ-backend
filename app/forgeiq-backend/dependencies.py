@@ -4,7 +4,7 @@
 import os
 import logging
 from typing import Optional, AsyncGenerator
-
+__all__ = ["get_private_intel_client"]  # ✅ Ensures it is exportable
 import httpx
 from fastapi import Security, HTTPException, status as fastapi_status
 from fastapi.security.api_key import APIKeyHeader
