@@ -1,7 +1,3 @@
-# =====================================================================
-# 📁 app/forgeiq-backend/main.py (V1.2 - Codex CLI, MCP, and Algorithm Modules)
-# =====================================================================
-
 import os
 import json
 import datetime
@@ -13,6 +9,8 @@ import httpx
 from contextlib import asynccontextmanager  # ✅ For lifespan events
 from typing import Dict, Any, Optional, List
 from .auth import get_api_key  # ✅ Ensure correct import reference
+from .auth import get_private_intel_client  # ✅ Ensure correct import reference
+
 # ✅ FastAPI Dependencies
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security
 
