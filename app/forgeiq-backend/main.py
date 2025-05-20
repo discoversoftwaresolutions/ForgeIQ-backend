@@ -9,7 +9,7 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager # For lifespan events
 from typing import Dict, Any, Optional, List
-
+from core.task_runner.index import TASK_COMMANDS  # ✅ Corrects module lookup
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security
 
 # --- Observability Setup (as before) ---
