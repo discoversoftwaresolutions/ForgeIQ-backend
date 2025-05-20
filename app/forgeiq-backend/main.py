@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager # For lifespan events
 from typing import Dict, Any, Optional, List
 from .index import TASK_COMMANDS
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security
+from app.forgeiq_backend.api_models import CodeGenerationRequest  # ✅ Correct module lookup
 
 # --- Observability Setup (as before) ---
 SERVICE_NAME = "ForgeIQ_Backend_Py"
