@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 # --- Configuration for API Key ---
 API_KEY_NAME = "X-API-Key" # Standard header name for API keys
 FORGEIQ_BACKEND_API_KEY = os.getenv("FORGEIQ_BACKEND_API_KEY")
+from fastapi import Security, HTTPException
 
+def get_api_key(api_key: str = Security(...)):  # Replace `...` with actual security implementation
+    """Validates API key for secured endpoints."""
+    if api_key != "your-secure-api-key":  # ✅ Replace with your real validation logic
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
 api_key_header_auth = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
 async def get_api_key(api_key_header: str = Security(api_key_header_auth)):
