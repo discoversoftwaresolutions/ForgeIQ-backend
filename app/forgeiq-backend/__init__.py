@@ -1,7 +1,8 @@
 # =====================================================================
 # 📁 app/forgeiq-backend/__init__.py (Package Initialization)
 # =====================================================================
-
+import sys, os
+sys.path.append(os.path.dirname(__file__))  # ✅ Adds 'forgeiq-backend' to Python’s lookup paths
 # ✅ Explicitly defining available exports for controlled imports
 __all__ = [
     "auth",
