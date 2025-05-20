@@ -179,3 +179,10 @@ async def lifespan(app: FastAPI):
 
 # ✅ Attach lifespan to FastAPI
 app.router.lifespan_context = lifespan
+from fastapi import Security, HTTPException
+
+def get_api_key(api_key: str = Security(...)):  # Replace `...` with actual validation logic
+    """Validates API key for secured endpoints."""
+    if api_key != "your-secure-api-key":  # ✅ Replace with your real validation logic
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
