@@ -125,6 +125,7 @@ class ApplyAlgorithmResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
 
+# --- MCP Strategy Optimization Models ---
 
 class MCPStrategyApiRequest(BaseModel):
     """Defines request structure for MCP strategy optimization."""
@@ -145,3 +146,25 @@ class MCPStrategyApiResponse(BaseModel):
     status: str
     message: Optional[str] = None
     strategy_details: Optional[MCPStrategyApiDetails] = None
+
+# ✅ Define __all__ to ensure controlled imports
+__all__ = [
+    "UserPromptData",
+    "PipelineGenerateRequest",
+    "DeploymentTriggerRequest",
+    "PipelineGenerateResponse",
+    "DeploymentTriggerResponse",
+    "SDKTaskStatusModel",
+    "SDKDagExecutionStatusModel",
+    "SDKDeploymentStatusModel",
+    "ProjectConfigResponse",
+    "BuildGraphNodeModel",
+    "BuildGraphResponse",
+    "TaskDefinitionModel",
+    "TaskListResponse",
+    "ApplyAlgorithmRequest",
+    "ApplyAlgorithmResponse",
+    "MCPStrategyApiRequest",  # ✅ Added MCP models
+    "MCPStrategyApiResponse",
+    "MCPStrategyApiDetails"
+]
