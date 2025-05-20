@@ -9,7 +9,7 @@ import httpx
 from contextlib import asynccontextmanager  # ✅ For lifespan events
 from typing import Dict, Any, Optional, List
 from .auth import get_api_key  # ✅ Ensure correct import reference
-from .auth import get_private_intel_client  # ✅ Ensure correct import reference
+from app.forgeiq_backend.auth import get_private_intel_client  # ✅ Absolute import
 
 # ✅ FastAPI Dependencies
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security
