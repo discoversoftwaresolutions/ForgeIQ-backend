@@ -12,3 +12,8 @@ def get_api_key(api_key: str = Security(api_key_header)):  # ✅ Correct usage
         raise HTTPException(status_code=403, detail="Invalid API Key")
     
     return api_key
+import httpx
+
+async def get_private_intel_client() -> httpx.AsyncClient:
+    """Initializes an HTTP client for the Private Intelligence Stack."""
+    return httpx.AsyncClient(base_url="https://private-intelligence-service.com")  # ✅ Replace with actual endpoint
