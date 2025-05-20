@@ -2,12 +2,14 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 import uuid  # ✅ Used for default request ID generation
 
+# --- Code Generation Request Model ---
 
 class CodeGenerationRequest(BaseModel):
     """Defines request structure for code generation."""
     project_id: str
     prompt_text: str
-    config_options: dict
+    config_options: Dict[str, Any]  # ✅ Changed from `dict` for type safety
+
 # --- Request Models ---
 
 class UserPromptData(BaseModel):
@@ -60,13 +62,13 @@ class SDKDagExecutionStatusModel(BaseModel):
     project_id: Optional[str] = None
     status: str
     message: Optional[str] = None
-    started_at: Optional[str] = None  # Optional for NOT_FOUND cases
+    started_at: Optional[str] = None  # ✅ Optional for NOT_FOUND cases
     completed_at: Optional[str] = None
     task_statuses: List[SDKTaskStatusModel] = []
 
 class SDKDeploymentStatusModel(BaseModel):
     """Defines deployment status for SDK services."""
-    deployment_id: Optional[str] = None  # Might not be known if status is PENDING_TRIGGER
+    deployment_id: Optional[str] = None  # ✅ Might not be known if status is PENDING_TRIGGER
     request_id: str
     project_id: str
     service_name: str
@@ -82,25 +84,25 @@ class SDKDeploymentStatusModel(BaseModel):
 class ProjectConfigResponse(BaseModel):
     """Defines project configuration response."""
     project_id: str
-    configuration: Dict[str, Any]  # Or create a specific model for config structure
+    configuration: Dict[str, Any]  # ✅ Or define a specific model for configuration structure
 
 class BuildGraphNodeModel(BaseModel):
     """Represents a single node in a build graph."""
     id: str
-    task_type: str  # Or 'name'
+    task_type: str  # ✅ Or 'name'
     dependencies: List[str]
 
 class BuildGraphResponse(BaseModel):
     """Defines the DAG response structure."""
     project_id: str
-    tasks_sequence: List[str]  # Based on current `core.build_graph.get_project_dag` output
+    tasks_sequence: List[str]  # ✅ Based on `core.build_graph.get_project_dag` output
     # If DAGs returned more detailed node structures, we could include:
     # nodes: List[BuildGraphNodeModel] = []
 
 class TaskDefinitionModel(BaseModel):
     """Defines an individual task structure."""
     task_name: str
-    command_details: List[str]  # From `core.task_runner.TASK_COMMANDS`
+    command_details: List[str]  # ✅ From `core.task_runner.TASK_COMMANDS`
     description: Optional[str] = None
 
 class TaskListResponse(BaseModel):
@@ -111,7 +113,7 @@ class TaskListResponse(BaseModel):
 
 class ApplyAlgorithmRequest(BaseModel):
     """Request model for applying proprietary algorithms."""
-    algorithm_id: str  # e.g., "CABGP", "RBCP"
+    algorithm_id: str  # ✅ e.g., "CABGP", "RBCP"
     project_id: Optional[str] = None
     context_data: Dict[str, Any]
 
