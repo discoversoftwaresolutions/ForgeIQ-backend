@@ -1,23 +1,23 @@
-# ================================================
-# 📁 app/forgeiq-backend/api_models.py
-# ================================================
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
-import uuid # For default factory in request_id
+import uuid  # ✅ Used for default request ID generation
 
 # --- Request Models ---
 
 class UserPromptData(BaseModel):
+    """Defines user input structure for pipeline generation."""
     prompt_text: str
     target_project_id: Optional[str] = None
     additional_context: Optional[Dict[str, Any]] = None
 
 class PipelineGenerateRequest(BaseModel):
+    """Model for pipeline generation requests."""
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     project_id: str
     user_prompt_data: UserPromptData
 
 class DeploymentTriggerRequest(BaseModel):
+    """Model for triggering deployments."""
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     project_id: str
     service_name: str
@@ -28,16 +28,19 @@ class DeploymentTriggerRequest(BaseModel):
 # --- Response Models ---
 
 class PipelineGenerateResponse(BaseModel):
+    """Response model for pipeline generation."""
     message: str
     request_id: str
     status: str = "accepted"
 
 class DeploymentTriggerResponse(BaseModel):
+    """Response model for deployment triggers."""
     message: str
     request_id: str
     status: str = "accepted"
 
 class SDKTaskStatusModel(BaseModel):
+    """Defines status information for SDK tasks."""
     task_id: str
     status: str
     message: Optional[str] = None
@@ -46,16 +49,18 @@ class SDKTaskStatusModel(BaseModel):
     completed_at: Optional[str] = None
 
 class SDKDagExecutionStatusModel(BaseModel):
+    """Defines execution status for DAGs."""
     dag_id: str
     project_id: Optional[str] = None
     status: str
     message: Optional[str] = None
-    started_at: Optional[str] = None # Making optional to handle NOT_FOUND case where it might not be set
+    started_at: Optional[str] = None  # Optional for NOT_FOUND cases
     completed_at: Optional[str] = None
     task_statuses: List[SDKTaskStatusModel] = []
 
 class SDKDeploymentStatusModel(BaseModel):
-    deployment_id: Optional[str] = None # This might not be known if status is e.g. PENDING_TRIGGER
+    """Defines deployment status for SDK services."""
+    deployment_id: Optional[str] = None  # Might not be known if status is PENDING_TRIGGER
     request_id: str
     project_id: str
     service_name: str
@@ -69,39 +74,43 @@ class SDKDeploymentStatusModel(BaseModel):
     completed_at: Optional[str] = None
 
 class ProjectConfigResponse(BaseModel):
+    """Defines project configuration response."""
     project_id: str
-    configuration: Dict[str, Any] # Or define a more specific Pydantic model for the config structure
+    configuration: Dict[str, Any]  # Or create a specific model for config structure
 
 class BuildGraphNodeModel(BaseModel):
+    """Represents a single node in a build graph."""
     id: str
-    task_type: str # Or 'name'
+    task_type: str  # Or 'name'
     dependencies: List[str]
-    # Add other fields as needed, e.g., command, params, if your core.build_graph provides them
 
 class BuildGraphResponse(BaseModel):
+    """Defines the DAG response structure."""
     project_id: str
-    tasks_sequence: List[str] # Based on current core.build_graph.get_project_dag output
-    # If get_project_dag returned a more complex structure, this model would change:
+    tasks_sequence: List[str]  # Based on current `core.build_graph.get_project_dag` output
+    # If DAGs returned more detailed node structures, we could include:
     # nodes: List[BuildGraphNodeModel] = []
-    # For now, aligning with List[str] output.
 
 class TaskDefinitionModel(BaseModel):
+    """Defines an individual task structure."""
     task_name: str
-    command_details: List[str] # From core.task_runner.TASK_COMMANDS
+    command_details: List[str]  # From `core.task_runner.TASK_COMMANDS`
     description: Optional[str] = None
 
 class TaskListResponse(BaseModel):
+    """Response model containing task definitions."""
     tasks: List[TaskDefinitionModel]
 
-# You can add more specific request/response models here as your API evolves.
-# For example, if POST/PUT endpoints expect specific data for creation/update.
-# In apps/forgeiq-backend/app/api_models.py
+# --- Algorithm Processing Models ---
+
 class ApplyAlgorithmRequest(BaseModel):
-    algorithm_id: str # e.g., "CABGP", "RBCP"
+    """Request model for applying proprietary algorithms."""
+    algorithm_id: str  # e.g., "CABGP", "RBCP"
     project_id: Optional[str] = None
     context_data: Dict[str, Any]
 
 class ApplyAlgorithmResponse(BaseModel):
+    """Response model for applied proprietary algorithms."""
     algorithm_id: str
     project_id: Optional[str]
     status: str
