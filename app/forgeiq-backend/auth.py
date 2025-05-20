@@ -1,5 +1,6 @@
 from fastapi import Security, HTTPException
 import httpx
+__all__ = ["get_private_intel_client"]  # ✅ Ensures it is exportable
 
 async def get_private_intel_client() -> httpx.AsyncClient:
     """Initializes an HTTP client for the Private Intelligence Stack."""
