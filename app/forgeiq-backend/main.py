@@ -12,7 +12,7 @@ import subprocess
 import httpx
 from contextlib import asynccontextmanager  # ✅ For lifespan events
 from typing import Dict, Any, Optional, List
-
+from .auth import get_api_key  # ✅ Ensure correct import reference
 # ✅ FastAPI Dependencies
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security
 
