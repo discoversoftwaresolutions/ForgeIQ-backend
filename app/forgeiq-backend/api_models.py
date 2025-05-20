@@ -132,4 +132,16 @@ class MCPStrategyApiRequest(BaseModel):
     optimization_goal: Optional[str] = None
     additional_mcp_context: Optional[Dict[str, Any]] = None
 
+class MCPStrategyApiDetails(BaseModel):
+    """Defines strategy details from MCP."""
+    strategy_id: str
+    new_dag_definition_raw: Dict[str, Any]
+    directives: Optional[Dict[str, Any]] = None
+    mcp_metadata: Optional[Dict[str, Any]] = None
 
+class MCPStrategyApiResponse(BaseModel):
+    """Response model for MCP strategy optimization."""
+    project_id: str
+    status: str
+    message: Optional[str] = None
+    strategy_details: Optional[MCPStrategyApiDetails] = None
