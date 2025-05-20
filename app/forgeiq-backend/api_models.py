@@ -2,6 +2,12 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 import uuid  # ✅ Used for default request ID generation
 
+
+class CodeGenerationRequest(BaseModel):
+    """Defines request structure for code generation."""
+    project_id: str
+    prompt_text: str
+    config_options: dict
 # --- Request Models ---
 
 class UserPromptData(BaseModel):
