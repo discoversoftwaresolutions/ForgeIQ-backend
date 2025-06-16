@@ -1,12 +1,11 @@
 """
 state.py
-
+from pydantic import BaseModel, ConfigDict
+from typing import Optional, Dict, Any
+class MyModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
 Defines orchestration flow state for DAG builds, deployment flows, and event tracking.
 """
-
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
-
 
 class OrchestrationFlowState(BaseModel):
     flow_id: str
