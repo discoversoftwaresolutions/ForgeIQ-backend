@@ -23,7 +23,7 @@ class Orchestrator:
             logger.error(f"SDK client not available to request MCP strategy for '{project_id}'.")
             return None
 
-        span = self._start_trace_span_if_available("request_mcp_strategy", project_id=project_id)
+        span = _start_trace_span_if_available("request_mcp_strategy", project_id=project_id)
         logger.info(f"Requesting MCP build strategy optimization for project '{project_id}'.")
 
         try:
@@ -59,7 +59,7 @@ class Orchestrator:
             logger.error(f"Flow {flow_id}: SDK client not available.")
             return None
 
-        span = self._start_trace_span_if_available(
+        span = _start_trace_span_if_available(
             "request_mcp_optimization",
             project_id=project_id,
             flow_id=flow_id,
