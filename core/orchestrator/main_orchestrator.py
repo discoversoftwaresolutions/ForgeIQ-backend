@@ -51,7 +51,7 @@ from interfaces.types.orchestration import OrchestrationFlowState
 # Import SDK client and relevant request/response models for code generation
 try:
     from sdk.client import ForgeIQClient
-    from apps.forgeiq_backend.app.api_models import (
+    from app.forgeiq_backend.app.api_models import (
         CodeGenerationPrompt, CodeGenerationResponse, GeneratedCodeOutput
     )
 except ImportError as e_sdk:
