@@ -4,7 +4,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from forgeiq_sdk.models import DagDefinition, SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
 from .exceptions import OrchestrationError
-from .trace_utils import _trace_api, _tracer  # or however your tracer is imported
+from .trace_utils import _tracer, _trace_api, start_trace_span_if_available
 from .utils import message_summary
 from .state import OrchestrationFlowState
 
