@@ -1,11 +1,12 @@
 """
 state.py
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, Dict, Any
-class MyModel(BaseModel):
-    model_config = ConfigDict(extra="allow")
-Defines orchestration flow state for DAG builds, deployment flows, and event tracking.
+
+Defines orchestration flow state using Pydantic v2 models.
 """
+
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, ConfigDict
+
 
 class OrchestrationFlowState(BaseModel):
     flow_id: str
@@ -13,10 +14,10 @@ class OrchestrationFlowState(BaseModel):
     project_id: str
     commit_sha: str
 
-    status: str = Field(default="PENDING")  # PENDING | RUNNING | COMPLETED | FAILED
+    status: str = "PENDING"  # e.g., PENDING | RUNNING | COMPLETED | FAILED
     current_stage: str
-    started_at: str  # ISO 8601 UTC timestamp
-    updated_at: str  # ISO 8601 UTC timestamp
+    started_at: str  # ISO8601 string
+    updated_at: str
 
     last_event_id_processed: Optional[str] = None
     dag_id: Optional[str] = None
@@ -25,6 +26,4 @@ class OrchestrationFlowState(BaseModel):
 
     context_data: Optional[Dict[str, Any]] = None
 
-    class Config:
-        arbitrary_types_allowed = True
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
