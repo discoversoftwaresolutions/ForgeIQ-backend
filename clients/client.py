@@ -2,6 +2,7 @@ import os
 import requests
 import logging
 
+# --------------------------------------------------
 class SecurePactClient:
     def __init__(self, base_url=None, timeout=5):
         self.base_url = base_url or os.getenv("SECUREPACT_URL", "http://localhost:9000")
@@ -14,7 +15,7 @@ class SecurePactClient:
                 json={
                     "headers": dict(headers),
                     "ip": ip,
-                    "body": body.decode("utf-8")  # optional: base64.encode if binary
+                    "body": body.decode("utf-8")
                 },
                 timeout=self.timeout
             )
@@ -25,17 +26,13 @@ class SecurePactClient:
             return {"error": "SecurePact verification failed"}
 
 # --------------------------------------------------
-
 class IntellicoreAGIClient:
     def __init__(self, base_url=None):
         self.base_url = base_url or os.getenv("INTELLICORE_URL", "http://localhost:9010")
 
     def run_inference(self, query: str, context: dict = None):
         try:
-            payload = {
-                "query": query,
-                "context": context or {}
-            }
+            payload = {"query": query, "context": context or {}}
             response = requests.post(f"{self.base_url}/infer", json=payload)
             response.raise_for_status()
             return response.json()
@@ -44,7 +41,6 @@ class IntellicoreAGIClient:
             return {"error": "Intellicore AGI inference failed"}
 
 # --------------------------------------------------
-
 class OptisysClient:
     def __init__(self, base_url=None):
         self.base_url = base_url or os.getenv("OPTISYS_URL", "http://localhost:9020")
@@ -57,3 +53,18 @@ class OptisysClient:
         except requests.exceptions.RequestException as e:
             logging.error(f"[OptisysClient] Optimization failed: {e}")
             return {"error": "Optisys optimization failed"}
+
+# --------------------------------------------------
+class ProverbsAPIClient:
+    def __init__(self, base_url=None):
+        self.base_url = base_url or os.getenv("PROVERBS_API_URL", "http://localhost:9030")
+
+    def evaluate_ethics(self, text: str, mode: str = "strict"):
+        try:
+            payload = {"text": text, "mode": mode}
+            response = requests.post(f"{self.base_url}/evaluate", json=payload)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"[ProverbsAPIClient] Ethics evaluation failed: {e}")
+            return {"error": "Proverbs_API evaluation failed"}
