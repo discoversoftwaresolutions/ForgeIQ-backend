@@ -1,25 +1,29 @@
+# forgeiq/mcp_executor.py
+
 from codex_client import generate_code_with_codex
-import asyncio
+from pathlib import Path
 
-class MCPProcessor:
-    """
-    Codex-enabled MCP Processor.
-    Triggers autonomous build-time code generation using prompts defined by the build pipeline.
-    """
+async def execute_dag_task(task_node: dict):
+    task_type = task_node.get("type")
+    task_id = task_node.get("task_id")
 
-    async def process(self, data):
-        task_type = data.get("type")
-        prompt = data.get("prompt")
+    if task_type == "codegen":
+        prompt = task_node.get("prompt", f"Generate boilerplate for task {task_id}")
+        code = await generate_code_with_codex(prompt)
 
-        if task_type == "build" and prompt:
-            generated_code = await generate_code_with_codex(prompt)
-            return {
-                "status": "codex_build_complete",
-                "generated_code": generated_code
-            }
+        # Save generated code
+        output_path = f"src/generated/{task_id}.py"
+        Path("src/generated").mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text(code)
 
-        return {
-            "status": "ignored",
-            "reason": "Only build tasks with a valid prompt are processed.",
-            "data": data
-        }
+        return {"status": "codegen_complete", "path": output_path}
+
+    elif task_type == "build":
+        # Insert your build logic here
+        pass
+
+    elif task_type == "test":
+        # Insert your test logic here
+        pass
+
+    return {"status": "skipped", "reason": f"Unknown task type: {task_type}"}
