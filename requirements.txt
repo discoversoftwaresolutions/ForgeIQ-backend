@@ -6,8 +6,6 @@
 fastapi==0.110.0
 uvicorn[standard]==0.29.0 # For running FastAPI & Streamlit (if using Uvicorn for Streamlit)
 pydantic==2.6.4
-streamlit # For ForgeIQ-ui (Streamlit version) & DebugIQ-frontend
-boto3>=1.28.0 # AWS SDK for Python, for S3 interaction
 prometheus_client>=0.17.0
 
 # --- Data & Machine Learning ---
@@ -19,6 +17,7 @@ numpy>=1.26.0,<2.0.0 # Often a dependency for ML/data libraries
 requests==2.31.0 # General purpose HTTP client (sync)
 httpx>=0.27.0,<0.28.0 # Async HTTP client (for SDK, and agents calling other APIs)
 redis>=4.6.0,<5.0.0 # For EventBus and SharedMemoryStore
+celery==5.3.6
 
 # --- OpenTelemetry (Observability) ---
 # Pin to a consistent version set for OTel, e.g., 1.24.0 or 1.25.0
