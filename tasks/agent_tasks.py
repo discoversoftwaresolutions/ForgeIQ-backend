@@ -1,7 +1,7 @@
 # forgeiq/tasks/agent_tasks.py
 
-from forgeiq.celery_worker import celery_app
-from forgeiq.codex_client import generate_code_with_codex
+from celery_worker import celery_app
+from codex_client import generate_code_with_codex
 from pathlib import Path
 import asyncio
 import logging
