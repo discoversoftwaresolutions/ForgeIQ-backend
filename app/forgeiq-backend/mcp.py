@@ -3,6 +3,14 @@ from tasks.agent_tasks import run_codex_task
 from codex_client import generate_code_with_codex
 from pathlib import Path
 
+
+class MCPProcessor:
+    """Stub class for MCP processing."""
+    
+    def process(self, data):
+        return {"status": "processed", "data": data}
+
+
 async def execute_dag_task(task_node: dict):
     task_type = task_node.get("type")
     task_id = task_node.get("task_id")
