@@ -1,5 +1,5 @@
 # forgeiq/mcp_executor.py
-from forgeiq.tasks.agent_tasks import run_codex_task
+from tasks.agent_tasks import run_codex_task
 from codex_client import generate_code_with_codex
 from pathlib import Path
 
