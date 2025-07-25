@@ -1,11 +1,11 @@
-# File: forgeiq-backend/tasks/build_tasks.py (UPDATED)
+# File: forgeiq-backend/tasks/build_tasks.py
 
 import logging
 import os
 import asyncio
 import subprocess
 from typing import Dict, Any
-from fastapi import HTTPException
+from fastapi import HTTPException # For raising structured errors from tasks
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -14,15 +14,15 @@ from tenacity import (
     before_sleep_log
 )
 
+import httpx # <--- ADDED: Import httpx for HTTP requests and error types
+
 # === ForgeIQ's Celery App and Utilities ===
-from forgeiq_celery import celery_app
-from forgeiq_utils import update_forgeiq_task_state_and_notify
+from forgeiq_celery import celery_app # ForgeIQ's own Celery app
+from forgeiq_utils import update_forgeiq_task_state_and_notify # ForgeIQ's own state update utility
 
 # === ForgeIQ's internal modules ===
 from app.orchestrator import Orchestrator # Orchestrator is now in app/orchestrator.py
 from app.auth import get_private_intel_client # For getting httpx client for intel stack
-
-# --- FIX APPLIED HERE: Corrected import path for api_models ---
 from api_models import CodeGenerationRequest, PipelineGenerateRequest, DeploymentTriggerRequest # Request models
 from api_models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse # MCP models
 
