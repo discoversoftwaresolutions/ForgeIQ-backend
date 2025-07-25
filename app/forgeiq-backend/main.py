@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 from app.auth import get_api_key, get_private_intel_client # For dependency injection
 from app.database import get_db, SessionLocal # For database sessions
 from app.models import ForgeIQTask # For ForgeIQ's task model
-from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify # ForgeIQ's Redis utilities
-from forgeiq_celery import celery_app # ForgeIQ's Celery app instance
+from autosoft_utils import get_redis_client, update_task_status_in_redis 
 
 # === Import ForgeIQ's internal Celery tasks ===
 from tasks.build_tasks import (
