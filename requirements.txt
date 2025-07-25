@@ -20,6 +20,9 @@ redis>=4.6.0,<5.0.0 # For EventBus and SharedMemoryStore
 celery==5.3.6
 tenacity
 
+sqlalchemy==2.0.30  # Or your specific desired version
+psycopg2-binary==2.9.9 # Or your specific desired version
+
 # --- OpenTelemetry (Observability) ---
 # Pin to a consistent version set for OTel, e.g., 1.24.0 or 1.25.0
 # Check for latest stable compatible versions when implementing.
