@@ -1,369 +1,270 @@
-# File: forgeiq-backend/main.py
-
+# ================================================
+# 📁 agents/MCP/controller.py -> This content will be in forgeiq-backend/orchestrator.py
+# (Private Repo)
+# ================================================
 import os
+import logging
+import asyncio
 import json
 import datetime
 import uuid
-import logging
-import asyncio
-import subprocess # Still needed for subprocess.CalledProcessError
-from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+# --- NEW IMPORTS FOR RETRIES AND ASYNC HTTP ---
+import httpx
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 
-from sqlalchemy.orm import Session # For DB dependency injection
-from sqlalchemy import text # <--- ADDED: For SQLAlchemy 2.0 raw SQL compatibility
+# === ASSUMED FORGEIQ SDK MODELS ===
+# These should be available from your `forgeiq_sdk` package or similar.
+# Ensure forgeiq_sdk is installed/available in the environment.
+try:
+    from forgeiq_sdk.models import DagDefinition, SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
+except ImportError:
+    # Fallback for conceptual testing if SDK is not installed.
+    # In a real setup, this would be an installation error.
+    class DagDefinition:
+        def __init__(self, nodes: List[Dict]): self.nodes = nodes; self.dag_id = "mock_dag"
+        def dict(self): return {"nodes": self.nodes, "dag_id": self.dag_id}
+    class SDKMCPStrategyRequestContext(Dict): pass
+    class SDKMCPStrategyResponse(Dict):
+        @property
+        def status(self): return self.get("status")
+        @property
+        def message(self): return self.get("message")
+        @property
+        def strategy_details(self): return self.get("strategy_details")
 
-# === Configure Logging ===
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# --- Internal MCP Components (relative imports) ---
+# Assuming these are in forgeiq-backend/agents/MCP/
+from agents.MCP.strategy import MCPStrategyEngine # This would be agents/MCP/strategy.py
+from agents.MCP.memory import get_mcp_memory # Assuming get_mcp_memory() is defined here
+from agents.MCP.metrics import get_mcp_metrics # Assuming get_mcp_metrics() is defined here
+from agents.MCP.governance_bridge import send_proprietary_audit_event # Assuming defined here
+
+# --- Observability & Initialization (OpenTelemetry) ---
+SERVICE_NAME_MCP = "MCPController_Private"
+# Using standard logging for consistency
 logger = logging.getLogger(__name__)
 
-# === Local imports specific to ForgeIQ ===
-from app.auth import get_api_key, get_private_intel_client # For dependency injection
-from app.database import get_db, SessionLocal # For database sessions (SessionLocal is imported but not directly used in main.py)
-from app.models import ForgeIQTask # For ForgeIQ's task model
-from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify
+_tracer = None
+_trace_api = None
+try:
+    from opentelemetry import trace as otel_trace_api
+    _tracer = otel_trace_api.get_tracer(SERVICE_NAME_MCP, "0.2.0")
+    _trace_api = otel_trace_api
+except ImportError:
+    logger.info(f"{SERVICE_NAME_MCP}: OpenTelemetry not available.")
 
-# === Import ForgeIQ's internal Celery tasks ===
-from tasks.build_tasks import (
-    run_codex_generation_task,
-    run_forgeiq_pipeline_task, # The main pipeline orchestrator task for ForgeIQ
-    run_pipeline_generation_task,
-    run_deployment_trigger_task
+# --- Global MCP Strategy & Memory Instances ---
+mcp_strategy = MCPStrategyEngine()
+mcp_memory = get_mcp_memory() # Assuming this function returns a singleton/instance
+mcp_metrics = get_mcp_metrics() # Assuming this function returns a singleton/instance
+
+# --- Custom Exception (as discussed) ---
+class OrchestrationError(Exception):
+    """Custom exception for errors during MCP orchestration."""
+    pass
+
+# --- Internal Utility (conceptual) ---
+def message_summary(response: Dict[str, Any]) -> str:
+    """Provides a brief summary of a response for logging."""
+    return f"Status: {response.get('status', 'N/A')}, Message: {response.get('message', 'N/A')[:50]}..."
+
+def start_trace_span_if_available(operation_name: str, parent_span_context: Optional[Any] = None, **attrs):
+    if _tracer and _trace_api:
+        span = _tracer.start_span(operation_name, context=parent_span_context)
+        for k,v_attr in attrs.items(): span.set_attribute(k, v_attr)
+        return span
+    class NoOpSpan:
+        def __enter__(self): return self; def __exit__(self,et,ev,tb): pass
+        def set_attribute(self,k,v): pass; def record_exception(self,e,a=None): pass
+        def set_status(self,s): pass; def end(self): pass
+    return NoOpSpan()
+
+
+# --- Define common retry strategy for SDK Client calls ---
+SDK_CLIENT_RETRY_STRATEGY = retry(
+    stop=stop_after_attempt(7), # More attempts for critical internal SDK calls
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Exponential backoff up to 60s
+    retry=(
+        retry_if_exception_type(httpx.HTTPStatusError) |
+        retry_if_exception_type(httpx.RequestError)
+    ),
+    retry_error_codes={429, 500, 502, 503, 504}, # Specific transient HTTP errors
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True # Re-raise the exception after exhausting retries
 )
 
-# === Import ForgeIQ's API Models ===
-from .api_models import (
-    CodeGenerationRequest,
-    PipelineGenerateRequest,
-    DeploymentTriggerRequest,
-    # ForgeIQ's response models (might include SDKTaskStatusModel for public facing status)
-    MCPStrategyApiRequest,
-    MCPStrategyApiResponse,
-    ApplyAlgorithmRequest,
-    ApplyAlgorithmResponse,
-    # Other models
-    ForgeIQTaskStatusResponse, # New Pydantic model for /forgeiq/status
-    TaskPayloadFromOrchestrator # NEW: Pydantic model for incoming /build
-)
+class Orchestrator:
+    """Orchestrates strategic optimization and governance-driven task execution within MCP."""
 
-# === Internal ForgeIQ components (already async or managed by tasks) ===
-# from .index import TASK_COMMANDS # Assumed to be loaded within tasks or specific handlers
-# from .mcp import MCPProcessor # Assumed to be used internally by Orchestrator or tasks
-# from .algorithm import AlgorithmExecutor # Assumed to be used internally by Orchestrator or tasks
-from orchestrator import Orchestrator # The orchestrator class
+    def __init__(self, forgeiq_sdk_client: Any, message_router: Any = None): # message_router can be None if not used
+        logger.info("🚀 MCPController (Orchestrator) Initializing...")
+        self.forgeiq_sdk_client = forgeiq_sdk_client # This client is assumed to be async (using httpx)
+        self.message_router = message_router # May be None if not directly using it for internal routing
+        self.retention_limit = 100
+        self._update_flow_state = self._get_flow_state_updater() # Setup state updater
+        logger.info("✅ MCPController (Orchestrator) Initialized.")
 
-# === FastAPI instance ===
-app = FastAPI(
-    title="ForgeIQ Backend",
-    description="Agentic intelligence and orchestration for engineering pipelines.",
-    version="1.0.0"
-)
-logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
+    # Placeholder/conceptual method for _update_flow_state.
+    def _get_flow_state_updater(self):
+        async def update_stub(flow_id: str, updates: Dict[str, Any]):
+            logger.info(f"ForgeIQ Internal Flow State Update for {flow_id}: {updates}")
+            # TODO: Implement actual DB update for ForgeIQ's internal flow state
+            #       This would typically use ForgeIQ's app.database.SessionLocal and app.models.ForgeIQTask
+            #       And its own forgeiq_utils.update_forgeiq_task_state_and_notify
+            pass # Replace with actual DB/Redis logic
+        return update_stub
 
-# === Global Async Redis Client instance for ForgeIQ ===
-_global_forgeiq_redis_aio_client = None
+    async def request_mcp_strategy_optimization(
+        self, project_id: str, current_dag: Optional[DagDefinition] = None
+    ) -> Dict[str, Any]: # Changed return type to Dict[str, Any] for consistency with main.py
+        if not self.forgeiq_sdk_client:
+            logger.error(f"SDK client not available to request MCP strategy for '{project_id}'.")
+            raise OrchestrationError(f"ForgeIQ SDK client unavailable for project '{project_id}'.")
 
-@app.on_event("startup")
-async def startup_event():
-    global _global_forgeiq_redis_aio_client
-    _global_forgeiq_redis_aio_client = await get_forgeiq_redis_client()
-    # You might want to run Base.metadata.create_all(bind=engine) for ForgeIQ's DB here for dev
-    # from app.models import Base # Ensure Base is imported in app/models for ForgeIQ
-    # Base.metadata.create_all(bind=app.state.database_engine) # Use app.state.database_engine if stored there
-    logger.info("✅ ForgeIQ: Database and async Redis client connected.")
+        span = start_trace_span_if_available("request_mcp_strategy", project_id=project_id)
+        logger.info(f"Requesting MCP build strategy optimization for project '{project_id}'.")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    if _global_forgeiq_redis_aio_client:
-        await _global_forgeiq_redis_aio_client.close()
-        logger.info("❌ ForgeIQ: Redis client closed.")
-    # Assuming DB engine disposal is handled by app.database or similar global cleanup
-    # if app.state.database_engine:
-    #     app.state.database_engine.dispose()
-    #     logger.info("❌ ForgeIQ: Database engine disposed.")
+        try:
+            with span:
+                @SDK_CLIENT_RETRY_STRATEGY
+                async def _call_mcp_strategy():
+                    mcp_response = await self.forgeiq_sdk_client.request_mcp_build_strategy(
+                        project_id=project_id,
+                        current_dag_info=current_dag # Pass as is, SDK should handle serialization
+                    )
+                    # The SDK client's method should return a dict or Pydantic model
+                    return mcp_response
 
+                mcp_response_data = await _call_mcp_strategy()
 
-# === Browser-accessible root route ===
-@app.get("/")
-def root():
-    return {
-        "message": "✅ ForgeIQ Backend is live.",
-        "docs": "/docs",
-        "status": "/status",
-        "version": app.version
-    }
-
-# === Health/status check ===
-@app.get("/status", tags=["System"])
-async def api_status(db: Session = Depends(get_db)): # Added DB dependency for full health check
-    try:
-        await _global_forgeiq_redis_aio_client.ping() # Check Redis connectivity
-        # --- FIX APPLIED HERE ---
-        db.execute(text("SELECT 1")) # <--- UPDATED: Wrap raw SQL with text()
-        return {
-            "status": "online",
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "version": app.version,
-            "database": "connected",
-            "redis": "connected"
-        }
-    except Exception as e:
-        logger.error(f"ForgeIQ health check failed: {e}")
-        raise HTTPException(status_code=500, detail={"status": "unhealthy", "details": str(e)})
+                if mcp_response_data:
+                    logger.info(f"Received strategy from MCP: {message_summary(mcp_response_data)}")
+                    if _trace_api and span:
+                        span.set_attribute("mcp.response_status", mcp_response_data.get("status"))
+                        span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                    return mcp_response_data
+                else:
+                    logger.warning(f"No valid MCP response received for '{project_id}'.")
+                    if _trace_api and span:
+                        span.set_attribute("mcp.response_received", False)
+                        span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "No valid MCP response"))
+                    raise OrchestrationError(f"No valid MCP response for project '{project_id}'.")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error requesting MCP strategy for '{project_id}': {e.response.status_code} - {e.response.text[:200]}", exc_info=True)
+            if _trace_api and span:
+                span.record_exception(e)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, f"HTTP Error {e.response.status_code}"))
+            raise OrchestrationError(f"MCP service HTTP error: {e.response.status_code} - {e.response.text[:200]}") from e
+        except httpx.RequestError as e:
+            logger.error(f"Network error requesting MCP strategy for '{project_id}': {e}", exc_info=True)
+            if _trace_api and span:
+                span.record_exception(e)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Network Error"))
+            raise OrchestrationError(f"MCP service network error: {str(e)}") from e
+        except Exception as e:
+            logger.error(f"Unhandled error requesting MCP strategy for '{project_id}': {e}", exc_info=True)
+            if _trace_api and span:
+                span.record_exception(e)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Unhandled Exception"))
+            raise OrchestrationError(f"Unhandled error during MCP strategy request: {str(e)}") from e
 
 
-# --- NEW: Primary Build Endpoint (Called by Autosoft Orchestrator) ---
-# This accepts a TaskPayload from Autosoft Orchestrator and dispatches the main ForgeIQ pipeline task.
-@app.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPayloadFromOrchestrator, db: Session = Depends(get_db)):
-    forgeiq_task_id = str(uuid.uuid4()) # Generate a unique ID for this internal ForgeIQ task
-    
-    # Create the initial ForgeIQTask record in ForgeIQ's database
-    try:
-        new_forgeiq_task = ForgeIQTask(
-            id=forgeiq_task_id,
-            task_type="build_orchestration", # Or "pipeline_build"
-            status="pending",
-            progress=0,
-            current_stage="Queued",
-            payload=task_payload_from_orchestrator.dict(), # Store the incoming payload
-            logs="ForgeIQ build task received and queued."
-        )
-        db.add(new_forgeiq_task)
-        db.commit()
-        db.refresh(new_forgeiq_task)
+    async def request_and_apply_mcp_optimization(
+        self, project_id: str, current_dag: DagDefinition, flow_id: str
+    ) -> Optional[DagDefinition]:
+        if not self.forgeiq_sdk_client:
+            logger.error(f"Flow {flow_id}: SDK client not available for MCP optimization.")
+            raise OrchestrationError(f"ForgeIQ SDK client unavailable for flow '{flow_id}'.")
 
-        # Dispatch the main ForgeIQ pipeline task to its Celery queue
-        run_forgeiq_pipeline_task.delay(task_payload_from_orchestrator.dict(), forgeiq_task_id)
-
-        logger.info(f"ForgeIQ build request received. Internal Task ID: {forgeiq_task_id}. Task created in DB and dispatched.")
-
-        return {
-            "status": "accepted",
-            "message": "ForgeIQ pipeline started in background.",
-            "forgeiq_task_id": forgeiq_task_id # Return ForgeIQ's internal task ID
-        }
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"ForgeIQ: Error initiating build task for {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate ForgeIQ build task: {e}")
-
-
-# --- Offloaded Endpoints (now dispatch Celery tasks) ---
-
-@app.post("/code_generation", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-async def generate_code_endpoint(request: CodeGenerationRequest, db: Session = Depends(get_db)):
-    forgeiq_task_id = str(uuid.uuid4())
-    
-    try:
-        new_forgeiq_task = ForgeIQTask(
-            id=forgeiq_task_id,
-            task_type="code_generation",
-            status="pending",
-            progress=0,
-            current_stage="Queued",
-            payload=request.dict(),
-            logs="Code generation task received and queued."
-        )
-        db.add(new_forgeiq_task)
-        db.commit()
-        db.refresh(new_forgeiq_task)
-
-        run_codex_generation_task.delay(request.dict(), forgeiq_task_id)
-        logger.info(f"Code generation request received. Task ID: {forgeiq_task_id}.")
-        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"ForgeIQ: Error initiating code generation task {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate code generation task: {e}")
-
-
-@app.post("/pipeline_generate", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-async def generate_pipeline_endpoint(request: PipelineGenerateRequest, db: Session = Depends(get_db)):
-    forgeiq_task_id = str(uuid.uuid4())
-
-    try:
-        new_forgeiq_task = ForgeIQTask(
-            id=forgeiq_task_id,
-            task_type="pipeline_generation",
-            status="pending",
-            progress=0,
-            current_stage="Queued",
-            payload=request.dict(),
-            logs="Pipeline generation task received and queued."
-        )
-        db.add(new_forgeiq_task)
-        db.commit()
-        db.refresh(new_forgeiq_task)
-
-        run_pipeline_generation_task.delay(request.dict(), forgeiq_task_id)
-        logger.info(f"Pipeline generation request received. Task ID: {forgeiq_task_id}.")
-        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"ForgeIQ: Error initiating pipeline generation task {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate pipeline generation task: {e}")
-
-
-@app.post("/deploy_service", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-async def deploy_service_endpoint(request: DeploymentTriggerRequest, db: Session = Depends(get_db)):
-    forgeiq_task_id = str(uuid.uuid4())
-
-    try:
-        new_forgeiq_task = ForgeIQTask(
-            id=forgeiq_task_id,
-            task_type="deployment_trigger",
-            status="pending",
-            progress=0,
-            current_stage="Queued",
-            payload=request.dict(),
-            logs="Deployment trigger task received and queued."
-        )
-        db.add(new_forgeiq_task)
-        db.commit()
-        db.refresh(new_forgeiq_task)
-
-        run_deployment_trigger_task.delay(request.dict(), forgeiq_task_id)
-        logger.info(f"Deployment request received. Task ID: {forgeiq_task_id}.")
-        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"ForgeIQ: Error initiating deployment task {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate deployment task: {e}")
-
-
-# --- Existing Endpoints (remain largely unchanged, rely on external calls) ---
-# Assuming these make calls to the 'private intel client' which has its own async handling.
-
-@app.post("/api/forgeiq/mcp/optimize-strategy/{project_id}", response_model=MCPStrategyApiResponse)
-async def mcp_optimize_strategy_endpoint(
-    project_id: str,
-    request_data: MCPStrategyApiRequest,
-    intel_stack_client: httpx.AsyncClient = Depends(get_private_intel_client),
-    api_key: str = Depends(get_api_key) # This dependency is used to satisfy the Security(api_key_scheme)
-):
-    # This endpoint remains synchronous from ForgeIQ's perspective as it awaits intel_stack_client
-    # The actual heavy lifting is expected to happen asynchronously within the intel_stack_client's service.
-    if not intel_stack_client:
-        raise HTTPException(status_code=503, detail="MCP service client unavailable.")
-    try:
-        # Assuming the Orchestrator class internally handles retries and specific exceptions
-        # as per our previous update to forgeiq/orchestrator.py
-        orchestrator_instance = Orchestrator(forgeiq_sdk_client=intel_stack_client, message_router=None)
-        mcp_response_data = await orchestrator_instance.request_mcp_strategy_optimization(
+        span = start_trace_span_if_available(
+            "request_mcp_optimization",
             project_id=project_id,
-            current_dag=None # You would provide current_dag if needed for this endpoint
+            flow_id=flow_id,
+            mcp_task="optimize_dag"
         )
-        if not mcp_response_data:
-            raise HTTPException(status_code=500, detail="MCP strategy optimization returned no data.")
-        
-        # Convert dict response from Orchestrator method to Pydantic model
-        return MCPStrategyApiResponse(**mcp_response_data)
-    except Exception as e: # Catch OrchestrationError if raised from orchestrator.py
-        logger.error(f"ForgeIQ: Error in MCP optimize strategy endpoint: {e}")
-        raise HTTPException(status_code=500, detail=f"ForgeIQ MCP exception: {str(e)}")
 
+        await self._update_flow_state(
+            flow_id,
+            {"current_stage": f"REQUESTING_MCP_OPTIMIZATION_FOR_DAG_{current_dag.dag_id}"}
+        )
 
-@app.post("/api/forgeiq/algorithms/apply", response_model=ApplyAlgorithmResponse)
-async def apply_proprietary_algorithm_endpoint(
-    request_data: ApplyAlgorithmRequest,
-    intel_stack_client: httpx.AsyncClient = Depends(get_private_intel_client),
-    api_key: str = Depends(get_api_key) # This dependency is used to satisfy the Security(api_key_scheme)
-):
-    # This endpoint also remains synchronous from ForgeIQ's perspective
-    if not intel_stack_client:
-        raise HTTPException(status_code=503, detail="Algorithm service client unavailable.")
-    try:
-        # Assuming the AlgorithmExecutor or a similar internal component uses the intel_stack_client
-        # and has its own retry/error handling.
-        # For direct call to SDK:
-        response = await intel_stack_client.post("/invoke_proprietary_algorithm", json={
-            "algorithm_id": request_data.algorithm_id,
-            "project_id": request_data.project_id,
-            "context_data": request_data.context_data
-        })
-        response.raise_for_status()
-        return ApplyAlgorithmResponse(**response.json())
-    except httpx.HTTPStatusError as e:
-        logger.error(f"ForgeIQ: HTTP error applying algorithm: {e.response.status_code} - {e.response.text[:200]}")
-        raise HTTPException(status_code=502, detail=f"Algorithm service error: {e.response.text[:200]}")
-    except Exception as e:
-        logger.error(f"ForgeIQ: Error applying proprietary algorithm: {e}")
-        raise HTTPException(status_code=500, detail=f"Error calling private algorithm: {str(e)}")
+        try:
+            with span:
+                request_context = SDKMCPStrategyRequestContext(
+                    project_id=project_id,
+                    current_dag_snapshot=[dict(node) for node in current_dag.nodes or []],
+                    optimization_goal="general_build_efficiency",
+                    additional_mcp_context={"triggering_flow_id": flow_id}
+                )
 
+                @SDK_CLIENT_RETRY_STRATEGY
+                async def _call_mcp_optimization():
+                    response: SDKMCPStrategyResponse = await self.forgeiq_sdk_client.request_mcp_build_strategy(
+                        context=request_context
+                    )
+                    return response
 
-@app.get("/task_list", response_model=TaskListResponse)
-def get_tasks():
-    # This endpoint remains synchronous and serves static data
-    from .index import TASK_COMMANDS # Assuming TASK_COMMANDS is defined here
-    tasks = [TaskDefinitionModel(task_name=k, command_details=v) for k, v in TASK_COMMANDS.items()]
-    return TaskListResponse(tasks=tasks)
+                response_data: SDKMCPStrategyResponse = await _call_mcp_optimization()
 
+                if (
+                    response_data and response_data.status == "strategy_provided"
+                    and response_data.strategy_details
+                ):
+                    strategy = response_data.strategy_details
+                    new_raw_dag = strategy.new_dag_definition_raw
 
-# --- NEW: Internal ForgeIQ Task Status Endpoints ---
+                    if new_raw_dag and isinstance(new_raw_dag, dict):
+                        new_dag = DagDefinition(**new_raw_dag)
+                        logger.info(f"Flow {flow_id}: Optimized DAG '{new_dag.dag_id}' received.")
+                        if _trace_api and span:
+                            span.set_attribute("mcp.strategy_id", strategy.strategy_id)
+                            span.set_attribute("mcp.new_dag_id", new_dag.dag_id)
+                            span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
+                        await self._update_flow_state(
+                            flow_id,
+                            {"current_stage": f"MCP_OPTIMIZATION_RECEIVED_DAG_{new_dag.dag_id}"}
+                        )
+                        return new_dag
+                    else:
+                        logger.info(f"Flow {flow_id}: Strategy returned without new DAG definition.")
+                        if _trace_api and span:
+                            span.set_attribute("mcp.directives_only", True)
+                        await self._update_flow_state(flow_id, {"current_stage": "MCP_OPTIMIZATION_NO_NEW_DAG"})
+                        return None
+                else:
+                    msg = f"MCP strategy unavailable or invalid for '{project_id}': {response_data.message if response_data else 'No response'}"
+                    logger.warning(f"Flow {flow_id}: {msg}")
+                    if _trace_api and span:
+                        span.set_attribute("mcp.error", msg)
+                    await self._update_flow_state(flow_id, {"current_stage": "MCP_OPTIMIZATION_FAILED_OR_NO_STRATEGY"})
+                    raise OrchestrationError(f"MCP strategy unavailable or invalid: {msg}")
 
-@app.get("/forgeiq/status/{forgeiq_task_id}", response_model=ForgeIQTaskStatusResponse)
-async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = Depends(get_db)):
-    task = db.query(ForgeIQTask).filter(ForgeIQTask.id == forgeiq_task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="ForgeIQ Task not found")
-
-    # Convert SQLAlchemy model to Pydantic ForgeIQTaskStatusResponse for response
-    return ForgeIQTaskStatusResponse(
-        task_id=task.id,
-        task_type=task.task_type,
-        status=task.status,
-        current_stage=task.current_stage,
-        progress=task.progress,
-        logs=task.logs if task.logs else "",
-        output_data=task.output_data if task.output_data else {},
-        details=task.details if task.details else {}
-    )
-
-@app.websocket("/ws/forgeiq/status/{forgeiq_task_id}")
-async def websocket_forgeiq_status_endpoint(websocket: WebSocket, forgeiq_task_id: str):
-    await websocket.accept()
-    logger.info(f"ForgeIQ WebSocket client connected for task_id: {forgeiq_task_id}")
-
-    r = _global_forgeiq_redis_aio_client # Use the globally initialized async Redis client for this service
-    pubsub = r.pubsub()
-    channel_name = f"forgeiq_task_updates:{forgeiq_task_id}" # Specific channel for ForgeIQ tasks
-    await pubsub.subscribe(channel_name)
-
-    try:
-        # Frontend should fetch initial state via GET /forgeiq/status/{forgeiq_task_id}
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message and message["type"] == "message":
-                data = json.loads(message["data"])
-                await websocket.send_json(data)
-            await asyncio.sleep(0.1) # Small sleep to prevent busy-waiting / CPU hogging
-    except WebSocketDisconnect:
-        logger.info(f"ForgeIQ WebSocket client disconnected from task_id: {forgeiq_task_id}")
-    except Exception as e:
-        logger.error(f"ForgeIQ WebSocket error for task_id {forgeiq_task_id}: {e}")
-    finally:
-        await pubsub.unsubscribe(channel_name)
-
-
-# === Lifecycle events ===
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting ForgeIQ Backend...")
-    # This is where you might run database table creation for dev:
-    # from app.database import create_db_tables
-    # create_db_tables()
-    yield
-    logger.info("🛑 Shutting down ForgeIQ Backend...")
-
-app.router.lifespan_context = lifespan
-
-# === Run Server for Local Dev ===
-if __name__ == "__main__":
-    import uvicorn
-    # IMPORTANT: Ensure your FORGEIQ_DATABASE_URL, FORGEIQ_REDIS_URL,
-    # and other environment variables are set before running.
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True) # Use a different port, e.g., 8002 Please update the file
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Flow {flow_id}: HTTP error during MCP optimization: {e.response.status_code} - {e.response.text[:200]}", exc_info=True)
+            if _trace_api and span:
+                span.record_exception(e)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, f"HTTP Error {e.response.status_code}"))
+            raise OrchestrationError(f"MCP optimization HTTP error: {e.response.status_code} - {e.response.text[:200]}") from e
+        except httpx.RequestError as e:
+            logger.error(f"Flow {flow_id}: Network error during MCP optimization: {e}", exc_info=True)
+            if _trace_api and span:
+                span.record_exception(e)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Network Error"))
+            raise OrchestrationError(f"MCP optimization network error: {str(e)}") from e
+        except OrchestrationError: # Re-raise if our own OrchestrationError was raised
+            raise
+        except Exception as e:
+            logger.error(f"Flow {flow_id}: Unhandled error during MCP optimization: {e}", exc_info=True)
+            if _trace_api and span:
+                span.record_exception(e)
+                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Unhandled Exception"))
+            raise OrchestrationError(f"Unhandled error during MCP optimization: {str(e)}") from e
