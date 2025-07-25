@@ -18,6 +18,7 @@ requests==2.31.0 # General purpose HTTP client (sync)
 httpx>=0.27.0,<0.28.0 # Async HTTP client (for SDK, and agents calling other APIs)
 redis>=4.6.0,<5.0.0 # For EventBus and SharedMemoryStore
 celery==5.3.6
+tenacity
 
 # --- OpenTelemetry (Observability) ---
 # Pin to a consistent version set for OTel, e.g., 1.24.0 or 1.25.0
@@ -31,6 +32,7 @@ opentelemetry-instrumentation-httpx~=0.46b0    # For httpx client used in SDK/ag
 opentelemetry-instrumentation-redis~=0.46b0    # For Redis client used by EventBus/SharedMemory
 opentelemetry-instrumentation-logging~=0.46b0 # To add trace context to logs
 
+
 # --- Developer Tools (Linting, Formatting, Testing) ---
 flake8>=6.0.0,<7.0.0
 black>=24.0.0,<25.0.0
@@ -40,10 +42,12 @@ pytest>=7.0.0,<8.0.0
 # pytest-asyncio # If you have async test functions for Pytest
 # python-dotenv # For loading .env files during local development
 
+
 # --- Other specific dependencies for your agents or core logic ---
 # Add any other packages here as needed by your Python components.
 # For example, if CI_CD_Agent uses boto3 for AWS:
 # boto3
+
 
 # For example, if BuildSurfAgent uses the OpenAI client directly:
 openai>=1.10.0,<2.0.0
