@@ -19,11 +19,12 @@ from forgeiq_celery import celery_app
 from forgeiq_utils import update_forgeiq_task_state_and_notify
 
 # === ForgeIQ's internal modules ===
-# --- FIX APPLIED HERE: Corrected import path for Orchestrator ---
-from app.orchestrator import Orchestrator
+from app.orchestrator import Orchestrator # Orchestrator is now in app/orchestrator.py
 from app.auth import get_private_intel_client # For getting httpx client for intel stack
-from .api_models import CodeGenerationRequest, PipelineGenerateRequest, DeploymentTriggerRequest # Request models
-from .api_models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse # MCP models
+
+# --- FIX APPLIED HERE: Corrected import path for api_models ---
+from api_models import CodeGenerationRequest, PipelineGenerateRequest, DeploymentTriggerRequest # Request models
+from api_models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse # MCP models
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -39,6 +40,7 @@ HTTP_RETRY_STRATEGY = retry(
     retry_error_codes={429, 500, 502, 503, 504},
     before_sleep=before_sleep_log(logger, logging.INFO),
 )
+
 
 # === Celery Task for Codex Code Generation ===
 @celery_app.task(bind=True)
