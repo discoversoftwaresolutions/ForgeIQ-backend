@@ -297,7 +297,6 @@ async def apply_proprietary_algorithm_endpoint(
 
 @app.get("/task_list", response_model=TaskListResponse)
 def get_tasks():
-    # This endpoint remains synchronous and serves static data
     from .index import TASK_COMMANDS # Assuming TASK_COMMANDS is defined here
     tasks = [TaskDefinitionModel(task_name=k, command_details=v) for k, v in TASK_COMMANDS.items()]
     return TaskListResponse(tasks=tasks)
