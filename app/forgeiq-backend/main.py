@@ -13,13 +13,16 @@ from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from sqlalchemy.orm import Session # For DB dependency injection
+from sqlalchemy import text # <--- ADDED: For SQLAlchemy 2.0 raw SQL compatibility
+
 # === Configure Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # === Local imports specific to ForgeIQ ===
 from app.auth import get_api_key, get_private_intel_client # For dependency injection
-from app.database import get_db, SessionLocal # For database sessions
+from app.database import get_db, SessionLocal # For database sessions (SessionLocal is imported but not directly used in main.py)
 from app.models import ForgeIQTask # For ForgeIQ's task model
 from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify
 
@@ -98,7 +101,8 @@ def root():
 async def api_status(db: Session = Depends(get_db)): # Added DB dependency for full health check
     try:
         await _global_forgeiq_redis_aio_client.ping() # Check Redis connectivity
-        db.execute("SELECT 1") # Check DB connectivity
+        # --- FIX APPLIED HERE ---
+        db.execute(text("SELECT 1")) # <--- UPDATED: Wrap raw SQL with text()
         return {
             "status": "online",
             "timestamp": datetime.datetime.utcnow().isoformat(),
@@ -293,73 +297,73 @@ async def apply_proprietary_algorithm_endpoint(
 
 @app.get("/task_list", response_model=TaskListResponse)
 def get_tasks():
-    # This endpoint remains synchronous and serves static data
-    from .index import TASK_COMMANDS # Assuming TASK_COMMANDS is defined here
-    tasks = [TaskDefinitionModel(task_name=k, command_details=v) for k, v in TASK_COMMANDS.items()]
-    return TaskListResponse(tasks=tasks)
+    # This endpoint remains synchronous and serves static data
+    from .index import TASK_COMMANDS # Assuming TASK_COMMANDS is defined here
+    tasks = [TaskDefinitionModel(task_name=k, command_details=v) for k, v in TASK_COMMANDS.items()]
+    return TaskListResponse(tasks=tasks)
 
 
 # --- NEW: Internal ForgeIQ Task Status Endpoints ---
 
 @app.get("/forgeiq/status/{forgeiq_task_id}", response_model=ForgeIQTaskStatusResponse)
 async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = Depends(get_db)):
-    task = db.query(ForgeIQTask).filter(ForgeIQTask.id == forgeiq_task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="ForgeIQ Task not found")
+    task = db.query(ForgeIQTask).filter(ForgeIQTask.id == forgeiq_task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="ForgeIQ Task not found")
 
-    # Convert SQLAlchemy model to Pydantic ForgeIQTaskStatusResponse for response
-    return ForgeIQTaskStatusResponse(
-        task_id=task.id,
-        task_type=task.task_type,
-        status=task.status,
-        current_stage=task.current_stage,
-        progress=task.progress,
-        logs=task.logs if task.logs else "",
-        output_data=task.output_data if task.output_data else {},
-        details=task.details if task.details else {}
-    )
+    # Convert SQLAlchemy model to Pydantic ForgeIQTaskStatusResponse for response
+    return ForgeIQTaskStatusResponse(
+        task_id=task.id,
+        task_type=task.task_type,
+        status=task.status,
+        current_stage=task.current_stage,
+        progress=task.progress,
+        logs=task.logs if task.logs else "",
+        output_data=task.output_data if task.output_data else {},
+        details=task.details if task.details else {}
+    )
 
 @app.websocket("/ws/forgeiq/status/{forgeiq_task_id}")
 async def websocket_forgeiq_status_endpoint(websocket: WebSocket, forgeiq_task_id: str):
-    await websocket.accept()
-    logger.info(f"ForgeIQ WebSocket client connected for task_id: {forgeiq_task_id}")
+    await websocket.accept()
+    logger.info(f"ForgeIQ WebSocket client connected for task_id: {forgeiq_task_id}")
 
-    r = _global_forgeiq_redis_aio_client # Use the globally initialized async Redis client for this service
-    pubsub = r.pubsub()
-    channel_name = f"forgeiq_task_updates:{forgeiq_task_id}" # Specific channel for ForgeIQ tasks
-    await pubsub.subscribe(channel_name)
+    r = _global_forgeiq_redis_aio_client # Use the globally initialized async Redis client for this service
+    pubsub = r.pubsub()
+    channel_name = f"forgeiq_task_updates:{forgeiq_task_id}" # Specific channel for ForgeIQ tasks
+    await pubsub.subscribe(channel_name)
 
-    try:
-        # Frontend should fetch initial state via GET /forgeiq/status/{forgeiq_task_id}
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message and message["type"] == "message":
-                data = json.loads(message["data"])
-                await websocket.send_json(data)
-            await asyncio.sleep(0.1) # Small sleep to prevent busy-waiting / CPU hogging
-    except WebSocketDisconnect:
-        logger.info(f"ForgeIQ WebSocket client disconnected from task_id: {forgeiq_task_id}")
-    except Exception as e:
-        logger.error(f"ForgeIQ WebSocket error for task_id {forgeiq_task_id}: {e}")
-    finally:
-        await pubsub.unsubscribe(channel_name)
+    try:
+        # Frontend should fetch initial state via GET /forgeiq/status/{forgeiq_task_id}
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message["type"] == "message":
+                data = json.loads(message["data"])
+                await websocket.send_json(data)
+            await asyncio.sleep(0.1) # Small sleep to prevent busy-waiting / CPU hogging
+    except WebSocketDisconnect:
+        logger.info(f"ForgeIQ WebSocket client disconnected from task_id: {forgeiq_task_id}")
+    except Exception as e:
+        logger.error(f"ForgeIQ WebSocket error for task_id {forgeiq_task_id}: {e}")
+    finally:
+        await pubsub.unsubscribe(channel_name)
 
 
 # === Lifecycle events ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting ForgeIQ Backend...")
-    # This is where you might run database table creation for dev:
-    # from app.database import create_db_tables
-    # create_db_tables()
-    yield
-    logger.info("🛑 Shutting down ForgeIQ Backend...")
+    logger.info("🚀 Starting ForgeIQ Backend...")
+    # This is where you might run database table creation for dev:
+    # from app.database import create_db_tables
+    # create_db_tables()
+    yield
+    logger.info("🛑 Shutting down ForgeIQ Backend...")
 
 app.router.lifespan_context = lifespan
 
 # === Run Server for Local Dev ===
 if __name__ == "__main__":
-    import uvicorn
-    # IMPORTANT: Ensure your FORGEIQ_DATABASE_URL, FORGEIQ_REDIS_URL,
-    # and other environment variables are set before running.
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True) # Use a different port, e.g., 8002
+    import uvicorn
+    # IMPORTANT: Ensure your FORGEIQ_DATABASE_URL, FORGEIQ_REDIS_URL,
+    # and other environment variables are set before running.
+    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True) # Use a different port, e.g., 8002 Please update the file
