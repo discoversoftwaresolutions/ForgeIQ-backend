@@ -1,11 +1,11 @@
-# File: forgeiq-backend/tasks/build_tasks.py
+# File: forgeiq-backend/tasks/build_tasks.py (UPDATED)
 
 import logging
 import os
 import asyncio
 import subprocess
 from typing import Dict, Any
-from fastapi import HTTPException # For raising structured errors from tasks
+from fastapi import HTTPException
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -15,12 +15,13 @@ from tenacity import (
 )
 
 # === ForgeIQ's Celery App and Utilities ===
-from forgeiq_celery import celery_app # ForgeIQ's own Celery app
-from forgeiq_utils import update_forgeiq_task_state_and_notify # ForgeIQ's own state update utility
+from forgeiq_celery import celery_app
+from forgeiq_utils import update_forgeiq_task_state_and_notify
 
 # === ForgeIQ's internal modules ===
-from orchestrator import Orchestrator # The Orchestrator class we just updated
-from .auth import get_private_intel_client # For getting httpx client for intel stack
+# --- FIX APPLIED HERE: Corrected import path for Orchestrator ---
+from app.orchestrator import Orchestrator # Orchestrator is now in app/orchestrator.py
+from app.auth import get_private_intel_client # For getting httpx client for intel stack
 from .api_models import CodeGenerationRequest, PipelineGenerateRequest, DeploymentTriggerRequest # Request models
 from .api_models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse # MCP models
 
@@ -39,7 +40,6 @@ HTTP_RETRY_STRATEGY = retry(
     before_sleep=before_sleep_log(logger, logging.INFO),
 )
 
-
 # === Celery Task for Codex Code Generation ===
 @celery_app.task(bind=True)
 async def run_codex_generation_task(self, request_payload_dict: Dict[str, Any], forgeiq_task_id: str):
@@ -52,14 +52,12 @@ async def run_codex_generation_task(self, request_payload_dict: Dict[str, Any], 
     logger.info(f"ForgeIQ Task {forgeiq_task_id}: Processing code generation for project '{request.project_id}'")
 
     try:
-        # Run synchronous subprocess call in a separate thread
         def _blocking_codex_cli_call():
             cmd = [
                 "codex-cli",
                 "--prompt", request.prompt_text,
                 "--config", json.dumps(request.config_options)
             ]
-            # check=True will raise CalledProcessError if returncode is non-zero
             return subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         process = await asyncio.to_thread(_blocking_codex_cli_call)
@@ -93,13 +91,7 @@ async def run_codex_generation_task(self, request_payload_dict: Dict[str, Any], 
 # === Celery Task for Overall ForgeIQ Pipeline Orchestration (POST /build maps to this) ===
 @celery_app.task(bind=True)
 async def run_forgeiq_pipeline_task(self, task_payload_dict: Dict[str, Any], forgeiq_task_id: str):
-    # This task orchestrates the ForgeIQ internal pipeline (e.g., Code Gen, MCP, Algorithms)
-    # The TaskPayload comes from the Autosoft Orchestrator.
-    # Its status is tracked internally by ForgeIQ.
-
-    # TODO: Define a proper Pydantic model for the incoming task_payload_dict from Autosoft Orchestrator
-    # For now, assuming it contains at least 'project_id' and 'prompt_text' for code generation
-    task_payload_from_orchestrator = task_payload_dict # This is the incoming TaskPayload.dict() from Autosoft Orchestrator
+    task_payload_from_orchestrator = task_payload_dict
 
     await update_forgeiq_task_state_and_notify(
         forgeiq_task_id, status="running", logs="ForgeIQ pipeline initiated.",
@@ -109,18 +101,14 @@ async def run_forgeiq_pipeline_task(self, task_payload_dict: Dict[str, Any], for
 
     try:
         # --- 1. Code Generation (e.g., using Codex CLI) ---
-        # Instead of calling subprocess directly, dispatch Codex gen as a sub-task or call it
-        # as a function here if it's lightweight enough for this task's context.
-        # Given it's subprocess.run, it should be its own task.
         await update_forgeiq_task_state_and_notify(
             forgeiq_task_id, logs="Triggering Codex code generation...",
             current_stage="Codex Gen", progress=20
         )
-        # Dispatch Codex generation as a sub-task and await its result
         codex_gen_result = await run_codex_generation_task.delay(
             {"project_id": task_payload_from_orchestrator.get('project_id'), "prompt_text": task_payload_from_orchestrator.get('payload', {}).get('prompt')},
-            forgeiq_task_id # Pass ForgeIQ's task ID for logging/correlation
-        ).get(timeout=3600) # Max 1 hour for code gen subtask
+            forgeiq_task_id
+        ).get(timeout=3600)
         
         if codex_gen_result.get("status") != "success":
             raise HTTPException(status_code=500, detail=f"Codex generation failed: {codex_gen_result.get('error')}")
@@ -139,16 +127,13 @@ async def run_forgeiq_pipeline_task(self, task_payload_dict: Dict[str, Any], for
         )
         logger.info(f"ForgeIQ Pipeline Task {forgeiq_task_id}: Requesting MCP strategy.")
 
-        # Instantiate Orchestrator (needs SDK client)
-        # Here, you'd get your intel_stack_client (httpx.AsyncClient)
-        # This part assumes get_private_intel_client can be called from task context
         intel_stack_client = await get_private_intel_client()
-        mcp_orchestrator = Orchestrator(forgeiq_sdk_client=intel_stack_client, message_router=None) # message_router might not be needed here
+        mcp_orchestrator = Orchestrator(forgeiq_sdk_client=intel_stack_client, message_router=None)
 
         optimized_dag = await mcp_orchestrator.request_and_apply_mcp_optimization(
             project_id=task_payload_from_orchestrator.get('project_id'),
-            current_dag=None, # You'd need to provide an actual current DAG here
-            flow_id=forgeiq_task_id # Use ForgeIQ's internal task_id as flow_id for tracing
+            current_dag=None, # You would provide an actual current DAG here
+            flow_id=forgeiq_task_id
         )
 
         if not optimized_dag:
@@ -167,14 +152,6 @@ async def run_forgeiq_pipeline_task(self, task_payload_dict: Dict[str, Any], for
         )
         logger.info(f"ForgeIQ Pipeline Task {forgeiq_task_id}: Applying proprietary algorithms.")
 
-        # This part requires a specific algorithm_id and context_data
-        # This will depend on the pipeline details
-        # For example: apply_algo_response = await algorithm_executor.apply_algorithm_async(...)
-        # Or another SDK client call:
-        # algorithm_apply_response = await intel_stack_client.post("/invoke_proprietary_algorithm", json={...})
-        # algorithm_apply_response.raise_for_status()
-        # applied_algo_result = algorithm_apply_response.json()
-        
         # Simulate algorithm application result
         applied_algo_result = {"status": "success", "processed_data": "some_optimized_data"}
 
