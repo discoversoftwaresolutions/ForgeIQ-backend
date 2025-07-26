@@ -16,45 +16,54 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text # For SQLAlchemy 2.0 raw SQL compatibility
 
+import httpx # <--- ADDED: Import httpx for AsyncClient in endpoints
+
 # === Configure Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # === Local imports specific to ForgeIQ ===
-from app.auth import get_api_key, get_private_intel_client # For dependency injection
+from app.auth import get_api_key, get_private_intel_client # From app/forgeiq-backend/auth.py
 from app.database import get_db # SessionLocal is used internally by get_db()
-from app.models import ForgeIQTask # For ForgeIQ's task model
+from app.models import ForgeIQTask # From app/forgeiq-backend/models.py
+
+# === Celery App and Utilities imports ===
+from forgeiq_celery import celery_app
 from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify
 
 # === Import ForgeIQ's internal Celery tasks ===
 from tasks.build_tasks import (
     run_codex_generation_task,
-    run_forgeiq_pipeline_task, # The main pipeline orchestrator task for ForgeIQ
+    run_forgeiq_pipeline_task,
     run_pipeline_generation_task,
     run_deployment_trigger_task
 )
 
 # === Import ForgeIQ's API Models ===
 from .api_models import (
+    UserPromptData,
     CodeGenerationRequest,
     PipelineGenerateRequest,
     DeploymentTriggerRequest,
+    ApplyAlgorithmRequest,
     MCPStrategyApiRequest,
     MCPStrategyApiResponse,
-    ApplyAlgorithmRequest,
-    ApplyAlgorithmResponse,
+    ProjectConfigResponse,
+    BuildGraphNodeModel,
+    BuildGraphResponse,
     ForgeIQTaskStatusResponse,
-    TaskPayloadFromOrchestrator # Assuming this is a Pydantic model defined elsewhere
+    TaskDefinitionModel,
+    TaskListResponse,
+    TaskPayloadFromOrchestrator,
+    SDKMCPStrategyRequestContext,
+    SDKMCPStrategyResponse
 )
 
 # === Internal ForgeIQ components ===
-# from .index import TASK_COMMANDS
-# from .mcp import MCPProcessor
-# from .algorithm import AlgorithmExecutor
-from orchestrator import Orchestrator # The orchestrator class (where the original NoOpSpan was defined)
+from app.orchestrator import Orchestrator # The orchestrator class (now at app/orchestrator.py)
 
 
-# === OpenTelemetry (optional) - Define NoOpSpan directly here for robustness ===
+# === OpenTelemetry (optional) ===
 _tracer_main = None
 _trace_api_main = None
 try:
@@ -63,23 +72,16 @@ try:
 
     _tracer_main = otel_trace_api.get_tracer("ForgeIQ Backend", "1.0.0")
     _trace_api_main = otel_trace_api
-
-    # Fix: Ensure NoOpSpan is robustly defined with correct syntax
     class NoOpSpan:
-        def __enter__(self):
-            return self
-        def __exit__(self, et, ev, tb):
-            pass
+        def __enter__(self): return self
+        def __exit__(self, et, ev, tb): pass
         def set_attribute(self, k, v): pass
         def record_exception(self, e, a=None): pass
         def set_status(self, s): pass
         def end(self): pass
-
-    _trace_api_main.NoOpContextManager = NoOpSpan # Assign NoOpSpan to context manager for consistent use
+    _trace_api_main.NoOpContextManager = NoOpSpan
 except ImportError:
     logger.info("ForgeIQ Backend: OpenTelemetry not available.")
-    # Fallback for _trace_api_main if OpenTelemetry is not installed
-    # This ensures code paths that use _trace_api_main don't error out
     class _NoOpTraceAPI:
         class Status:
             def __init__(self, code, description=None): pass
@@ -87,6 +89,9 @@ except ImportError:
             OK = "OK"
             ERROR = "ERROR"
         def get_current_span_context(self): return None
+        def Status(self, code, description=None):
+            class NoOpStatus: pass
+            return NoOpStatus()
         def NoOpContextManager(self):
             class NoOpCM:
                 def __enter__(self): return None
@@ -122,7 +127,7 @@ async def shutdown_event():
         await _global_forgeiq_redis_aio_client.close()
         logger.info("❌ ForgeIQ: Redis client closed.")
     # Assuming DB engine disposal is handled by app.database or similar global cleanup
-    # from app.database import engine # Ensure engine is imported from app.database
+    # from app.database import engine
     # if engine:
     #     engine.dispose()
     #     logger.info("❌ ForgeIQ: Database engine disposed.")
@@ -177,7 +182,7 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
 
         run_forgeiq_pipeline_task.delay(task_payload_from_orchestrator.dict(), forgeiq_task_id)
 
-        logger.info(f"Forgeiq build request received. Internal Task ID: {forgeiq_task_id}. Task created in DB and dispatched.")
+        logger.info(f"ForgeIQ build request received. Internal Task ID: {forgeiq_task_id}. Task created in DB and dispatched.")
 
         return {
             "status": "accepted",
@@ -287,7 +292,7 @@ async def mcp_optimize_strategy_endpoint(
         orchestrator_instance = Orchestrator(forgeiq_sdk_client=intel_stack_client, message_router=None)
         mcp_response_data = await orchestrator_instance.request_mcp_strategy_optimization(
             project_id=project_id,
-            current_dag=None # You would provide current_dag if needed for this endpoint
+            current_dag=None
         )
         if not mcp_response_data:
             raise HTTPException(status_code=500, detail="MCP strategy optimization returned no data.")
