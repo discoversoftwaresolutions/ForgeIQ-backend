@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text # For SQLAlchemy 2.0 raw SQL compatibility
 
-import httpx # <--- ADDED: Import httpx for AsyncClient in endpoints
+import httpx # For AsyncClient in endpoints
 
 # === Configure Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -40,6 +40,8 @@ from tasks.build_tasks import (
 )
 
 # === Import ForgeIQ's API Models ===
+# This import now pulls all the models exposed via app/forgeiq-backend/api_models.py
+# and the __init__.py makes them directly available.
 from .api_models import (
     UserPromptData,
     CodeGenerationRequest,
