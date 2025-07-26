@@ -4,6 +4,20 @@ import uuid  # ✅ Used for default request ID generation
 
 # --- Code Generation Request Model ---
 
+
+class ForgeIQTaskStatusResponse(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    current_stage: Optional[str] = None
+    progress: int = 0
+    logs: Optional[str] = None
+    output_data: Optional[Dict[str, Any]] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+
+
 class CodeGenerationRequest(BaseModel):
     """Defines request structure for code generation."""
     project_id: str
