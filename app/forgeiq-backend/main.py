@@ -47,7 +47,7 @@ from .api_models import (
     CodeGenerationRequest,
     PipelineGenerateRequest,
     DeploymentTriggerRequest,
-    ApplyAlgorithmRequest,
+    ApplyAlgorithmRequest, # This one is here
     MCPStrategyApiRequest,
     MCPStrategyApiResponse,
     ProjectConfigResponse,
@@ -58,7 +58,8 @@ from .api_models import (
     TaskListResponse,
     TaskPayloadFromOrchestrator,
     SDKMCPStrategyRequestContext,
-    SDKMCPStrategyResponse
+    SDKMCPStrategyResponse,
+    ApplyAlgorithmResponse # <--- This one is also here, the one causing the error
 )
 
 # === Internal ForgeIQ components ===
