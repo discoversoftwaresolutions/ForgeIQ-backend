@@ -6,7 +6,7 @@ import uuid # Needed for default_factory in Field
 
 # --- Request Models for ForgeIQ Endpoints ---
 
-# NEW: UserPromptData model
+# NEW: UserPromptData model (added in a previous step)
 class UserPromptData(BaseModel):
     """
     Model representing a user's prompt and associated context
@@ -61,6 +61,16 @@ class MCPStrategyApiRequest(BaseModel):
     additional_mcp_context: Dict[str, Any] = {}
 
 # --- Response Models for ForgeIQ Endpoints ---
+
+class ProjectConfigResponse(BaseModel): # <--- THIS IS THE MODEL IT'S TRYING TO IMPORT
+    """
+    Response model for project configuration details.
+    """
+    project_id: str
+    name: str
+    config_version: str
+    details: Dict[str, Any]
+
 
 class PipelineGenerateResponse(BaseModel):
     status: str
