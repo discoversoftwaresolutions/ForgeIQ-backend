@@ -6,7 +6,7 @@ import uuid # Needed for default_factory in Field
 
 # --- Request Models for ForgeIQ Endpoints ---
 
-# NEW: UserPromptData model (added in a previous step)
+# UserPromptData model
 class UserPromptData(BaseModel):
     """
     Model representing a user's prompt and associated context
@@ -99,9 +99,7 @@ class MCPStrategyApiResponse(BaseModel):
     strategy_details: Optional[MCPStrategyApiDetails] = None
 
 
-# --- SDK Models (used by ForgeIQ's Orchestrator internally or external SDKs) ---
-# These are used by the Orchestrator class when calling the private intel stack.
-# They are included here for completeness of API models, but might also live in forgeiq_sdk.models
+# SDK Models (used by ForgeIQ's Orchestrator internally or external SDKs)
 class SDKMCPStrategyRequestContext(BaseModel):
     project_id: str
     current_dag_snapshot: Optional[List[Dict[str, Any]]] = None
@@ -109,11 +107,10 @@ class SDKMCPStrategyRequestContext(BaseModel):
     additional_mcp_context: Dict[str, Any] = {}
 
 class SDKMCPStrategyResponse(BaseModel):
-    # This aligns with what the proprietary service is expected to return
     status: str # "strategy_provided", "unavailable"
     message: Optional[str] = None
     strategy_id: Optional[str] = None
-    strategy_details: Optional[MCPStrategyApiDetails] = None # Re-using details model
+    strategy_details: Optional[MCPStrategyApiDetails] = None
 
 class SDKTaskStatusModel(BaseModel): # Example for SDK response
     task_id: str
@@ -127,7 +124,7 @@ class SDKDeploymentStatusModel(BaseModel): # Example for SDK response
     deployment_id: str
     status: str
 
-# NEW: BuildGraphNodeModel (Conceptual model for a node within a DAG)
+# BuildGraphNodeModel (Conceptual model for a node within a DAG)
 class BuildGraphNodeModel(BaseModel):
     """
     A conceptual model for a node (task) within a build DAG.
@@ -141,8 +138,20 @@ class BuildGraphNodeModel(BaseModel):
     dependencies: List[str] = Field([], description="List of IDs of tasks this node depends on.")
     # Add any other fields you use in your DAG nodes, e.g., 'priority', 'status', 'estimated_duration'
 
-# --- ForgeIQ Internal Task Status Model ---
-# This is what /forgeiq/status/{forgeiq_task_id} returns
+# NEW: BuildGraphResponse (A response model that might contain a DAG structure)
+class BuildGraphResponse(BaseModel):
+    """
+    Response model containing a generated or optimized build graph (DAG).
+    """
+    dag_id: str = Field(..., description="ID of the generated/optimized DAG.")
+    project_id: str = Field(..., description="ID of the project the DAG belongs to.")
+    description: Optional[str] = Field(None, description="Description of the DAG.")
+    nodes: List[BuildGraphNodeModel] = Field([], description="List of nodes (tasks) in the DAG.")
+    status: str = Field(..., description="Status of the build graph generation/optimization.")
+    message: Optional[str] = Field(None, description="A message related to the response.")
+
+
+# ForgeIQ Internal Task Status Model
 class ForgeIQTaskStatusResponse(BaseModel):
     task_id: str
     task_type: str
@@ -153,7 +162,7 @@ class ForgeIQTaskStatusResponse(BaseModel):
     output_data: Optional[Dict[str, Any]] = None
     details: Optional[Dict[str, Any]] = None
 
-# --- Models used by /task_list endpoint ---
+# Models used by /task_list endpoint
 class TaskDefinitionModel(BaseModel):
     task_name: str
     command_details: Dict[str, Any]
@@ -161,8 +170,7 @@ class TaskDefinitionModel(BaseModel):
 class TaskListResponse(BaseModel):
     tasks: List[TaskDefinitionModel]
 
-# --- TaskPayload from Autosoft Orchestrator ---
-# This model defines the structure of the payload that Autosoft Orchestrator sends to ForgeIQ's /build endpoint
+# TaskPayload from Autosoft Orchestrator
 class TaskPayloadFromOrchestrator(BaseModel):
     task_id: str # This is the Orchestrator's task_id
     type: str # e.g., "orchestrate", "build"
