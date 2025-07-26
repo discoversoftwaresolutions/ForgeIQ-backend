@@ -6,6 +6,18 @@ import uuid # Needed for default_factory in Field
 
 # --- Request Models for ForgeIQ Endpoints ---
 
+class ForgeIQTaskStatusResponse(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    current_stage: Optional[str] = None
+    progress: int = 0
+    logs: Optional[str] = None
+    output_data: Optional[Dict[str, Any]] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+
 class CodeGenerationRequest(BaseModel):
     """
     Request model for the /code_generation endpoint.
