@@ -6,17 +6,16 @@ import uuid # Needed for default_factory in Field
 
 # --- Request Models for ForgeIQ Endpoints ---
 
-class ForgeIQTaskStatusResponse(BaseModel):
-    task_id: str
-    task_type: str
-    status: str
-    current_stage: Optional[str] = None
-    progress: int = 0
-    logs: Optional[str] = None
-    output_data: Optional[Dict[str, Any]] = None
-    details: Optional[Dict[str, Any]] = None
-
-
+# NEW: UserPromptData model
+class UserPromptData(BaseModel):
+    """
+    Model representing a user's prompt and associated context
+    for various AI-driven operations.
+    """
+    prompt: str = Field(..., description="The natural language prompt from the user.")
+    project_id: str = Field(..., description="The ID of the project this prompt relates to.")
+    user_id: Optional[str] = Field(None, description="Optional ID of the user submitting the prompt.")
+    context_data: Dict[str, Any] = Field({}, description="Additional context or metadata related to the prompt.")
 
 class CodeGenerationRequest(BaseModel):
     """
