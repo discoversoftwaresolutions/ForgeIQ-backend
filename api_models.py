@@ -62,7 +62,7 @@ class MCPStrategyApiRequest(BaseModel):
 
 # --- Response Models for ForgeIQ Endpoints ---
 
-class ProjectConfigResponse(BaseModel): # <--- THIS IS THE MODEL IT'S TRYING TO IMPORT
+class ProjectConfigResponse(BaseModel):
     """
     Response model for project configuration details.
     """
@@ -70,7 +70,6 @@ class ProjectConfigResponse(BaseModel): # <--- THIS IS THE MODEL IT'S TRYING TO 
     name: str
     config_version: str
     details: Dict[str, Any]
-
 
 class PipelineGenerateResponse(BaseModel):
     status: str
@@ -100,7 +99,7 @@ class MCPStrategyApiResponse(BaseModel):
     strategy_details: Optional[MCPStrategyApiDetails] = None
 
 
-# --- SDK Models (used by ForgeIQ's Orchestrator internally) ---
+# --- SDK Models (used by ForgeIQ's Orchestrator internally or external SDKs) ---
 # These are used by the Orchestrator class when calling the private intel stack.
 # They are included here for completeness of API models, but might also live in forgeiq_sdk.models
 class SDKMCPStrategyRequestContext(BaseModel):
@@ -128,6 +127,19 @@ class SDKDeploymentStatusModel(BaseModel): # Example for SDK response
     deployment_id: str
     status: str
 
+# NEW: BuildGraphNodeModel (Conceptual model for a node within a DAG)
+class BuildGraphNodeModel(BaseModel):
+    """
+    A conceptual model for a node (task) within a build DAG.
+    Aligns with expected DagNode fields for LLM generation/parsing.
+    """
+    id: str = Field(..., description="Unique task ID within the DAG.")
+    task_type: str = Field(..., description="Type of task (e.g., 'lint', 'test', 'build', 'deploy').")
+    command: Optional[List[str]] = Field(None, description="Command to execute this task.")
+    agent_handler: Optional[str] = Field(None, description="Agent responsible for handling this task (e.g., 'SecurityAgent').")
+    params: Dict[str, Any] = Field({}, description="Parameters specific to this task.")
+    dependencies: List[str] = Field([], description="List of IDs of tasks this node depends on.")
+    # Add any other fields you use in your DAG nodes, e.g., 'priority', 'status', 'estimated_duration'
 
 # --- ForgeIQ Internal Task Status Model ---
 # This is what /forgeiq/status/{forgeiq_task_id} returns
