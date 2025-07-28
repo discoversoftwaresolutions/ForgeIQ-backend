@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text # For SQLAlchemy 2.0 raw SQL compatibility
@@ -23,9 +24,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # === Local imports specific to ForgeIQ ===
-from app.auth import get_api_key, get_private_intel_client # From app/forgeiq-backend/auth.py
-from app.database import get_db # SessionLocal is used internally by get_db()
-from app.models import ForgeIQTask # From app/forgeiq-backend/models.py
+from app.auth import get_api_key, get_private_intel_client
+from app.database import get_db
+from app.models import ForgeIQTask
 
 # === Celery App and Utilities imports ===
 from forgeiq_celery import celery_app
@@ -40,14 +41,12 @@ from tasks.build_tasks import (
 )
 
 # === Import ForgeIQ's API Models ===
-# This import now pulls all the models exposed via app/forgeiq-backend/api_models.py
-# and the __init__.py makes them directly available.
 from .api_models import (
     UserPromptData,
     CodeGenerationRequest,
     PipelineGenerateRequest,
     DeploymentTriggerRequest,
-    ApplyAlgorithmRequest, # This one is here
+    ApplyAlgorithmRequest,
     MCPStrategyApiRequest,
     MCPStrategyApiResponse,
     ProjectConfigResponse,
@@ -59,11 +58,11 @@ from .api_models import (
     TaskPayloadFromOrchestrator,
     SDKMCPStrategyRequestContext,
     SDKMCPStrategyResponse,
-    ApplyAlgorithmResponse # <--- This one is also here, the one causing the error
+    ApplyAlgorithmResponse
 )
 
 # === Internal ForgeIQ components ===
-from app.orchestrator import Orchestrator # The orchestrator class (now at app/orchestrator.py)
+from app.orchestrator import Orchestrator
 
 
 # === OpenTelemetry (optional) ===
@@ -111,6 +110,23 @@ app = FastAPI(
 )
 logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
+
+# === CORS Middleware ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://auto-soft-front-bq4jvjzz9-allenfounders-projects.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "https://autosoft-deployment-repo-production.up.railway.app",
+        "*" # Temporarily allow all origins - REMOVE IN PRODUCTION AFTER DEBUGGING
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"],
+    allow_headers=["*"],
+)
+
+
 # === Global Async Redis Client instance for ForgeIQ ===
 _global_forgeiq_redis_aio_client = None
 
@@ -118,10 +134,6 @@ _global_forgeiq_redis_aio_client = None
 async def startup_event():
     global _global_forgeiq_redis_aio_client
     _global_forgeiq_redis_aio_client = await get_forgeiq_redis_client()
-    # You might want to run database table creation for dev here
-    # from app.models import Base # Ensure Base is imported in app/models for ForgeIQ
-    # from app.database import engine # Ensure engine is imported from app.database
-    # Base.metadata.create_all(bind=engine) # CAUTION: Only for development, use Alembic for production migrations!
     logger.info("✅ ForgeIQ: Database and async Redis client connected.")
 
 @app.on_event("shutdown")
@@ -129,11 +141,6 @@ async def shutdown_event():
     if _global_forgeiq_redis_aio_client:
         await _global_forgeiq_redis_aio_client.close()
         logger.info("❌ ForgeIQ: Redis client closed.")
-    # Assuming DB engine disposal is handled by app.database or similar global cleanup
-    # from app.database import engine
-    # if engine:
-    #     engine.dispose()
-    #     logger.info("❌ ForgeIQ: Database engine disposed.")
 
 
 # === Browser-accessible root route ===
@@ -151,7 +158,7 @@ def root():
 async def api_status(db: Session = Depends(get_db)):
     try:
         await _global_forgeiq_redis_aio_client.ping()
-        db.execute(text("SELECT 1")) # Corrected for SQLAlchemy 2.0
+        db.execute(text("SELECT 1"))
         return {
             "status": "online",
             "timestamp": datetime.datetime.utcnow().isoformat(),
@@ -198,7 +205,50 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
         raise HTTPException(status_code=500, detail=f"Failed to initiate ForgeIQ build task: {e}")
 
 
-# --- Offloaded Endpoints (now dispatch Celery tasks) ---
+# --- MODIFIED: /gateway Endpoint for frontend chat/general AI requests (ASYNC) ---
+@app.post("/gateway", status_code=status.HTTP_202_ACCEPTED) # Now returns 202 Accepted
+async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
+    """
+    Handles general AI requests from the frontend asynchronously.
+    Dispatches a Celery task for GPT Codex generation and immediately returns a task ID.
+    The frontend should track progress via WebSocket or polling.
+    """
+    forgeiq_task_id = str(uuid.uuid4())
+    
+    try:
+        # Create a new task entry in the database (status "pending")
+        new_forgeiq_task = ForgeIQTask(
+            id=forgeiq_task_id,
+            task_type="llm_chat_response", # Consistent task type for LLM interactions
+            status="pending",
+            progress=0,
+            current_stage="Queued for LLM processing",
+            payload=request_data.dict(), # Store the prompt and history sent by the user
+            logs="LLM request received and queued for processing."
+        )
+        db.add(new_forgeiq_task)
+        db.commit()
+        db.refresh(new_forgeiq_task)
+
+        logger.info(f"Gateway: Dispatching LLM request for task ID: {forgeiq_task_id}. Prompt: '{request_data.prompt[:50]}'")
+
+        # Dispatch the Celery task. The FastAPI worker is now immediately free.
+        run_codex_generation_task.delay(request_data.dict(), forgeiq_task_id)
+        
+        # Return the task ID immediately. Frontend should listen for updates.
+        return JSONResponse({
+            "status": "accepted",
+            "message": "LLM processing started in background.",
+            "task_id": forgeiq_task_id # Renamed to 'task_id' for clarity in frontend
+        })
+
+    except Exception as e:
+        db.rollback() # Rollback task creation if initial DB commit fails
+        logger.exception(f"ForgeIQ Gateway: Error initiating LLM task for prompt: '{request_data.prompt}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initiate LLM task: {e}")
+
+
+# --- Offloaded Endpoints (dispatch Celery tasks) ---
 
 @app.post("/code_generation", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def generate_code_endpoint(request: CodeGenerationRequest, db: Session = Depends(get_db)):
@@ -373,6 +423,7 @@ async def websocket_forgeiq_status_endpoint(websocket: WebSocket, forgeiq_task_i
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if message and message["type"] == "message":
                 data = json.loads(message["data"])
+                # Only send updates if the message is relevant to the task's final state or progress
                 await websocket.send_json(data)
             await asyncio.sleep(0.1) # Small sleep to prevent busy-waiting / CPU hogging
     except WebSocketDisconnect:
@@ -387,9 +438,6 @@ async def websocket_forgeiq_status_endpoint(websocket: WebSocket, forgeiq_task_i
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Starting ForgeIQ Backend...")
-    # This is where you might run database table creation for dev:
-    # from app.database import create_db_tables
-    # create_db_tables()
     yield
     logger.info("🛑 Shutting down ForgeIQ Backend...")
 
@@ -400,4 +448,4 @@ if __name__ == "__main__":
     import uvicorn
     # IMPORTANT: Ensure your FORGEIQ_DATABASE_URL, FORGEIQ_REDIS_URL,
     # and other environment variables are set before running.
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True) # Use a different port, e.g., 8002 Please update the file
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) # Corrected to port 8000
