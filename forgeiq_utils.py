@@ -12,7 +12,14 @@ logger.setLevel(logging.INFO)
 
 # --- Redis Client Setup for ForgeIQ ---
 # Ensure this matches ForgeIQ's Redis config, possibly a different DB or instance
-REDIS_URL = os.getenv("FORGEIQ_REDIS_URL", "redis://localhost:6379/1") # Use a different DB number for ForgeIQ
+# REMOVED: "redis://localhost:6379/1" fallback
+REDIS_URL = os.getenv("FORGEIQ_REDIS_URL")
+
+# Explicitly check if the environment variable was set
+if not REDIS_URL:
+    logger.error("FORGEIQ_REDIS_URL environment variable is NOT set for ForgeIQ utils. Cannot proceed without Redis URL.")
+    raise ValueError("FORGEIQ_REDIS_URL environment variable not set for ForgeIQ utils.")
+
 forgeiq_redis_client_instance: redis.Redis = None
 
 async def get_forgeiq_redis_client() -> redis.Redis:
