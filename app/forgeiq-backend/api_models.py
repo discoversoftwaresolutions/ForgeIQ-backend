@@ -1,5 +1,3 @@
-# File: forgeiq-backend/api_models.py
-
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import uuid # Needed for default_factory in Field
@@ -13,7 +11,11 @@ class UserPromptData(BaseModel):
     for various AI-driven operations.
     """
     prompt: str = Field(..., description="The natural language prompt from the user.")
-    project_id: str = Field(..., description="The ID of the project this prompt relates to.")
+    # ADDED: This field now correctly matches the 'history' array sent by the frontend
+    history: List[Dict[str, str]] = Field([], description="Conversation history, list of {'role': 'user'|'assistant', 'content': 'message'}")
+    
+    # MODIFIED: Made these fields Optional as they are not currently sent by the frontend's /gateway calls
+    project_id: Optional[str] = Field(None, description="The ID of the project this prompt relates to.")
     user_id: Optional[str] = Field(None, description="Optional ID of the user submitting the prompt.")
     context_data: Dict[str, Any] = Field({}, description="Additional context or metadata related to the prompt.")
 
@@ -159,7 +161,7 @@ class ForgeIQTaskStatusResponse(BaseModel):
     current_stage: Optional[str] = None
     progress: int = 0
     logs: Optional[str] = None
-    output_data: Optional[Dict[str, Any]] = None
+    output_data: Optional[Dict[str, Any]] = None # This will contain the 'llm_response'
     details: Optional[Dict[str, Any]] = None
 
 # Models used by /task_list endpoint
