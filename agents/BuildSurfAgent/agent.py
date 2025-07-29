@@ -1,14 +1,16 @@
 # ============================================
-# 📁 agents/BuildSurfAgent/agent.py (V0.2 Enhancements)
+# 📁 agents/BuildSurfAgent/agent.py (V0.2 Enhancements) - With Dual LLM (Codex CLI & Gemini API)
 # ============================================
 import os
 import json
 import datetime
 import uuid
-import httpx 
+import httpx # For HTTP requests and error types
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List, Union # Added Union
+import subprocess # For calling CLI tools like Codex CLI
+from typing import Dict, Any, Optional, List, Union, Set # Added Set for node_ids_seen
+from collections import defaultdict # Added for agent_capabilities_summary
 
 # --- Observability Setup (as before) ---
 SERVICE_NAME = "BuildSurfAgent"
@@ -17,27 +19,30 @@ logging.basicConfig(level=LOG_LEVEL, format=f'%(asctime)s - {SERVICE_NAME} - %(n
 _tracer = None; _trace_api = None
 try:
     from opentelemetry import trace as otel_trace_api
-    from core.observability.tracing import setup_tracing
+    from core.observability.tracing import setup_tracing # Assuming this path is correct
     _tracer = setup_tracing(SERVICE_NAME)
     _trace_api = otel_trace_api
 except ImportError: logging.getLogger(SERVICE_NAME).warning("BuildSurfAgent: Tracing setup failed.")
 logger = logging.getLogger(__name__)
 # --- End Observability Setup ---
 
-from core.event_bus.redis_bus import EventBus, message_summary
+from core.event_bus.redis_bus import EventBus, message_summary # Assuming these paths are correct
 from core.agent_registry import AgentRegistry # For fetching available agent handlers
-from core.build_system_config import get_project_config, get_task_weight # For context
-from interfaces.types.events import (
+from core.build_system_config import get_project_config # For context (assuming async version)
+from interfaces.types.events import ( # Assuming these paths are correct
     PipelineGenerationRequestEvent, DagNode, DagDefinition, DagDefinitionCreatedEvent, PipelineGenerationUserPrompt
 )
-# If using Pydantic for internal validation:
-# from pydantic import BaseModel, ValidationError, validator
-# class PydanticDagNode(BaseModel): ...
-# class PydanticDagDefinition(BaseModel): ...
 
-LLM_API_KEY = os.getenv("LLM_API_KEY")
-LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gpt-3.5-turbo-instruct") # Adjusted for completion if not chat
-LLM_API_BASE_URL = os.getenv("LLM_API_BASE_URL")
+# === LLM Provider Configuration ===
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower() # 'codex' for CLI, 'gemini' for API
+LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemini-pro") # Default for Gemini
+LLM_API_KEY = os.getenv("LLM_API_KEY") # Generic API key for either OpenAI or Gemini
+
+# --- OpenAI Specific (if LLM_PROVIDER could be OpenAI API) ---
+OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL")
+# --- Gemini Specific ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Specifically for Gemini, can be same as LLM_API_KEY if desired
+
 MAX_LLM_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_RETRY_DELAY_SECONDS = int(os.getenv("LLM_RETRY_DELAY_SECONDS", "5"))
 
@@ -46,26 +51,51 @@ DAG_CREATED_EVENT_CHANNEL_TEMPLATE = "events.project.{project_id}.dag.created"
 
 
 class BuildSurfAgent:
-    def __init__(self, agent_registry: Optional[AgentRegistry] = None): # Optional AgentRegistry
-        logger.info(f"Initializing BuildSurfAgent (V0.2) with LLM model: {LLM_MODEL_NAME}")
+    def __init__(self, agent_registry: Optional[AgentRegistry] = None):
+        logger.info(f"Initializing BuildSurfAgent (V0.2) with LLM provider: {LLM_PROVIDER}, model: {LLM_MODEL_NAME}")
         self.event_bus = EventBus()
         self.http_client = httpx.AsyncClient(timeout=180.0) # Increased timeout for potentially long LLM calls
-        self.agent_registry = agent_registry # Store for fetching agent capabilities if needed for prompt
+        self.agent_registry = agent_registry
 
         if not self.event_bus.redis_client: logger.error("BuildSurfAgent critical: EventBus not connected.")
-        if not LLM_API_KEY: logger.warning("LLM_API_KEY not set. BuildSurfAgent may not function.")
-
-        self.llm_client = None
-        if LLM_API_KEY and ("gpt" in LLM_MODEL_NAME.lower() or "openai" in (LLM_API_BASE_URL or "").lower()):
+        
+        self.llm_api_client = None # For OpenAI or Gemini API clients
+        
+        # --- Initialize OpenAI Client (if chosen) ---
+        if LLM_PROVIDER == "openai" or ("gpt" in LLM_MODEL_NAME.lower() and not LLM_PROVIDER == "gemini"):
+            if not LLM_API_KEY: logger.warning("LLM_API_KEY not set. OpenAI client will not be initialized.")
             try:
                 from openai import AsyncOpenAI # Ensure 'openai' is in requirements.txt
                 client_args = {"api_key": LLM_API_KEY}
-                if LLM_API_BASE_URL: client_args["base_url"] = LLM_API_BASE_URL
-                self.llm_client = AsyncOpenAI(**client_args)
-                logger.info("OpenAI client initialized.")
+                if OPENAI_API_BASE_URL: client_args["base_url"] = OPENAI_API_BASE_URL
+                self.llm_api_client = AsyncOpenAI(**client_args)
+                logger.info("OpenAI client initialized for BuildSurfAgent.")
             except ImportError: logger.error("OpenAI Python client not installed.")
             except Exception as e: logger.error(f"Failed to initialize OpenAI client: {e}")
-        # Add similar blocks for other LLM providers (e.g., Anthropic) if needed
+        
+        # --- Initialize Gemini Client (if chosen) ---
+        elif LLM_PROVIDER == "gemini":
+            if not GEMINI_API_KEY: 
+                logger.warning("GEMINI_API_KEY not set. Gemini client will not be initialized.")
+            else:
+                try:
+                    import google.generativeai as genai # Redundant import but good for local clarity
+                    genai.configure(api_key=GEMINI_API_KEY)
+                    # For Gemini, the 'client' is typically configured globally via genai.configure()
+                    # You then call methods directly on genai.GenerativeModel.
+                    # We'll set a flag or dummy object if we need a 'client' handle.
+                    self.llm_api_client = "gemini_configured" # Simple flag
+                    logger.info("Gemini API configured for BuildSurfAgent.")
+                except ImportError: logger.error("Google GenerativeAI client not installed.")
+                except Exception as e: logger.error(f"Failed to initialize Gemini client: {e}")
+        
+        elif LLM_PROVIDER == "codex":
+            logger.info("BuildSurfAgent configured to use Codex CLI.")
+            if not os.path.exists("/usr/local/bin/codex-cli"): # Basic check if CLI tool exists
+                logger.warning("Codex CLI executable not found at /usr/local/bin/codex-cli. Ensure it's installed and in PATH.")
+
+        else:
+            logger.error(f"Unsupported LLM_PROVIDER '{LLM_PROVIDER}'. BuildSurfAgent will not function for LLM calls.")
 
         logger.info("BuildSurfAgent V0.2 Initialized.")
 
@@ -73,7 +103,6 @@ class BuildSurfAgent:
     def tracer(self): return _tracer
 
     def _start_trace_span_if_available(self, operation_name: str, parent_context: Optional[Any] = None, **attrs):
-        # ... (same as Orchestrator's _start_trace_span_if_available from response #61)
         if _tracer and _trace_api:
             span = _tracer.start_span(f"buildsurf_agent.{operation_name}", context=parent_context)
             for k, v in attrs.items(): span.set_attribute(k, v)
@@ -87,14 +116,10 @@ class BuildSurfAgent:
             def end(self): pass
         return NoOpSpan()
 
-
     async def _get_additional_context_for_llm(self, project_id: Optional[str]) -> Dict[str, Any]:
-        """Gathers additional context to help the LLM generate a relevant DAG."""
         context = {}
         if project_id:
-            # Fetch project-specific config from core.build_system_config
-            # Note: get_project_config was async in my V0.1 definition
-            project_specific_config = await get_project_config(project_id) # Assuming get_project_config exists
+            project_specific_config = await get_project_config(project_id)
             if project_specific_config:
                 context["project_config_summary"] = {
                     "description": project_specific_config.get("description"),
@@ -102,9 +127,8 @@ class BuildSurfAgent:
                     "default_environment": project_specific_config.get("default_environment")
                 }
 
-        # Fetch available agent types/capabilities from AgentRegistry if available
         if self.agent_registry:
-            active_agents = self.agent_registry.discover_agents(status="active") # discover_agents is sync in V0.1
+            active_agents = self.agent_registry.discover_agents(status="active")
             agent_capabilities_summary = defaultdict(list)
             for agent_info in active_agents:
                 for cap in agent_info.get("capabilities", []):
@@ -112,20 +136,21 @@ class BuildSurfAgent:
             if agent_capabilities_summary:
                 context["available_agent_capabilities"] = dict(agent_capabilities_summary)
 
-        # TODO: Potentially add examples of existing DAGs or common task patterns
         return context
 
-    async def _construct_llm_prompt_v2(self, user_prompt_data: PipelineGenerationUserPrompt) -> str:
+    async def _construct_llm_prompt_v2(self, user_prompt_data: PipelineGenerationUserPrompt) -> Dict[str, Union[str, List[Dict[str, str]]]]:
+        """
+        Constructs the LLM prompt, now also preparing conversation history for chat models.
+        Returns a dict with 'prompt_text' and 'history' (empty list if not provided).
+        """
         project_id = user_prompt_data.get("target_project_id")
         user_prompt = user_prompt_data["prompt_text"]
         user_context = user_prompt_data.get("additional_context", {})
+        conversation_history = user_prompt_data.get("conversation_history", []) # New: Extract conversation history
 
-        # Fetch dynamic context
         dynamic_context = await self._get_additional_context_for_llm(project_id)
-        full_context = {**dynamic_context, **user_context} # User context can override dynamic
+        full_context = {**dynamic_context, **user_context}
 
-        # Example DagNode TypedDict structure for LLM to follow
-        # (from interfaces.types.graph)
         dag_node_example_fields = """
             - "id": str (unique task ID, e.g., "lint-python-code")
             - "task_type": str (e.g., "lint", "test", "build", "deploy", "security_scan", "code_analysis", "custom_script")
@@ -134,27 +159,25 @@ class BuildSurfAgent:
             - "params": Optional[Dict[str, Any]] (e.g., {"severity_threshold": "HIGH"} for SecurityAgent)
             - "dependencies": List[str] (list of other node 'id's)
         """
-        dag_json_example = """
-        {
-          "dag_id": "llm_generated_dag_<timestamp_or_uuid>",
-          "project_id": "<project_id_if_known_else_null>",
+        dag_json_example = f"""
+        {{
+          "dag_id": "llm_generated_dag_{uuid.uuid4().hex[:8]}",
+          "project_id": {json.dumps(project_id)},
           "description": "<A brief description of the pipeline generated from the prompt>",
           "nodes": [
-            {"id": "lint_code", "task_type": "lint", "command": ["make", "lint"], "dependencies": [], "params": {"strict": true}},
-            {"id": "unit_tests", "task_type": "test", "agent_handler": "TestAgent", "params": {"suite": "unit"}, "dependencies": ["lint_code"]}
+            {{"id": "lint_code", "task_type": "lint", "command": ["make", "lint"], "dependencies": [], "params": {{"strict": true}}}},
+            {{"id": "unit_tests", "task_type": "test", "agent_handler": "TestAgent", "params": {{"suite": "unit"}}, "dependencies": ["lint_code"]}}
           ]
-        }
+        }}
         """
-        # Using f-string for project_id placeholder in the example
-        dag_json_example = dag_json_example.replace("<project_id_if_known_else_null>", json.dumps(project_id))
 
-        prompt = f"""
+        system_instruction = f"""
         You are an AI assistant that designs build and deployment pipeline DAGs (Directed Acyclic Graphs).
         Your goal is to translate the user's request into a valid JSON object representing this DAG.
 
         The root JSON object must contain:
         - "dag_id": A unique string identifier for the DAG (e.g., "dag_" followed by a short UUID).
-        - "project_id": The string project identifier if provided (use "{project_id}" if applicable, otherwise null).
+        - "project_id": The string project identifier if provided (use {json.dumps(project_id)} if applicable, otherwise null).
         - "description": A brief string describing the generated pipeline.
         - "nodes": A list of node objects, where each node represents a task in the pipeline.
 
@@ -164,64 +187,144 @@ class BuildSurfAgent:
         Available context for this request:
         {json.dumps(full_context, indent=2, default=str)}
 
-        User's request for the pipeline:
-        "{user_prompt}"
-
-        Based on the user's request and the provided context, generate ONLY the valid JSON object representing the pipeline DAG.
-        Ensure all node 'id's are unique within the DAG.
-        Ensure all 'dependencies' for a node refer to 'id's of other nodes defined in the same DAG.
-        Do not include any explanatory text, apologies, or markdown formatting outside the JSON object itself.
         The output must be a single, valid JSON object.
         """
-        logger.debug(f"Constructed LLM prompt for project '{project_id}': {prompt[:300]}...") # Log snippet
-        return prompt.strip()
 
-    async def _call_llm_api_v2(self, prompt_text: str, request_id: str) -> Optional[str]:
-        if not self.llm_client:
-            logger.error(f"LLM client not available for request_id: {request_id}")
-            return None
+        # For models that take system messages or explicit chat history (like Gemini, OpenAI Chat models)
+        if LLM_PROVIDER == "gemini" or isinstance(self.llm_api_client, AsyncOpenAI):
+            # Convert system_instruction and user_prompt into messages format
+            messages = [{"role": "user", "parts": [system_instruction + "\nUser's request:\n\"" + user_prompt + "\""]}]
+            # If conversation_history is provided, it should typically precede the current turn.
+            # However, for DAG generation, often the system prompt is a single, strong instruction.
+            # For simplicity, if conversation_history is included, we can prepend it
+            # or just use the combined prompt. Given the DAG prompt is very strict,
+            # we'll embed user_prompt directly into the system_instruction as the last "user" turn.
+            # If `conversation_history` is meant for LLMs that handle multi-turn, it should be processed.
+            # For now, `_construct_llm_prompt_v2` returns `prompt_text` for the LLM.
+            # Let's adjust it to return structured messages if LLM is chat-based.
 
+            # This method now returns a dict with prepared messages OR a single string prompt.
+            # _call_llm_api_v2 will handle the interpretation.
+            return {
+                "prompt_text": system_instruction + "\nUser's request:\n\"" + user_prompt + "\"\n\n" + dag_json_example, # Combined for Codex CLI or simpler completion models
+                "messages": [{"role": "user", "parts": [system_instruction + "\nUser's request:\n\"" + user_prompt + "\""]},
+                             {"role": "model", "parts": [dag_json_example]} # Example of expected model response
+                            ] if LLM_PROVIDER == "gemini" or isinstance(self.llm_api_client, AsyncOpenAI) else None
+            }
+        else: # For Codex CLI or older completion models
+            full_prompt = f"""
+            {system_instruction}
+
+            User's request for the pipeline:
+            "{user_prompt}"
+
+            Example of expected JSON output:
+            {dag_json_example}
+            """
+            return {"prompt_text": full_prompt.strip(), "messages": None} # Return simple prompt for CLI
+
+    async def _call_llm_api_v2(self, prompt_data: Dict[str, Union[str, List[Dict[str, str]]]], request_id: str) -> Optional[str]:
+        """
+        Calls the selected LLM provider (Codex CLI or Gemini API) based on LLM_PROVIDER.
+        `prompt_data` contains either 'prompt_text' (for CLI/completion models) or 'messages' (for chat models).
+        """
         current_span = _trace_api.get_current_span() if _trace_api else None
-        if current_span:
-            current_span.set_attribute("llm.request.model", LLM_MODEL_NAME)
-            current_span.set_attribute("llm.prompt_length", len(prompt_text))
+        
+        # Extract prompt_text and messages from prompt_data
+        prompt_text_for_cli = prompt_data.get("prompt_text", "")
+        messages_for_api = prompt_data.get("messages", [])
+
+        if not (self.llm_api_client or LLM_PROVIDER == "codex"): # Ensure a client or CLI is configured
+            logger.error(f"LLM client or provider not available/configured for request_id: {request_id}. Provider: {LLM_PROVIDER}")
+            if current_span: current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "LLMProviderNotConfigured"))
+            return None
 
         for attempt in range(MAX_LLM_RETRIES):
             try:
-                logger.info(f"Sending request to LLM (Attempt {attempt + 1}/{MAX_LLM_RETRIES}) for request_id: {request_id}. Model: {LLM_MODEL_NAME}")
-                # Using Chat Completions for models like gpt-3.5-turbo, gpt-4 etc.
-                # If using older completion models, the API call would be different.
-                if isinstance(self.llm_client, AsyncOpenAI): # Check if it's OpenAI client
-                    chat_completion = await self.llm_client.chat.completions.create(
-                        messages=[{"role": "user", "content": prompt_text}],
+                logger.info(f"Sending request to LLM (Attempt {attempt + 1}/{MAX_LLM_RETRIES}) for request_id: {request_id}. Provider: {LLM_PROVIDER}")
+                
+                response_content = None
+
+                if LLM_PROVIDER == "codex":
+                    if not prompt_text_for_cli:
+                        raise ValueError("Prompt text is empty for Codex CLI.")
+                    # Run Codex CLI as a blocking call in a thread
+                    def _blocking_codex_cli_call():
+                        cmd = [
+                            "codex-cli",
+                            "--prompt", prompt_text_for_cli,
+                            # Pass other config options if codex-cli supports it (adjust as needed)
+                            # "--config", json.dumps(config_options) # If config_options are relevant
+                        ]
+                        process = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                        return process.stdout.strip()
+                    
+                    response_content = await asyncio.to_thread(_blocking_codex_cli_call)
+                    
+                    logger.debug(f"Codex CLI raw response for {request_id} (first 200 chars): {response_content[:200] if response_content else 'None'}")
+
+
+                elif LLM_PROVIDER == "gemini":
+                    if not messages_for_api:
+                        raise ValueError("Messages are empty for Gemini API.")
+                    
+                    model = genai.GenerativeModel(LLM_MODEL_NAME) # Re-instantiate or use global if preferred
+                    
+                    response = await model.generate_content_async( # Use async method
+                        messages_for_api,
+                        generation_config=genai.GenerationConfig(
+                            temperature=0.1, # Low temperature for structured JSON output
+                            max_output_tokens=2048 # Max tokens for DAG JSON
+                        ),
+                        safety_settings=[
+                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                        ]
+                    )
+                    response_content = response.text
+                    logger.debug(f"Gemini API raw response for {request_id} (first 200 chars): {response_content[:200] if response_content else 'None'}")
+
+
+                elif isinstance(self.llm_api_client, AsyncOpenAI): # Existing OpenAI API handling
+                    if not messages_for_api: # OpenAI chat API also uses messages
+                        raise ValueError("Messages are empty for OpenAI API.")
+                    
+                    chat_completion = await self.llm_api_client.chat.completions.create(
+                        messages=messages_for_api,
                         model=LLM_MODEL_NAME,
-                        temperature=0.1, # Low temperature for more deterministic/structured JSON
-                        # response_format={"type": "json_object"} # For newer OpenAI models
-                        max_tokens=2048 # Adjust as needed for expected DAG size
+                        temperature=0.1,
+                        max_tokens=2048
                     )
                     response_content = chat_completion.choices[0].message.content
-                    if current_span: 
+                    if current_span:
                         usage = chat_completion.usage
                         if usage:
-                            span.set_attribute("llm.usage.total_tokens", usage.total_tokens)
-                            span.set_attribute("llm.usage.prompt_tokens", usage.prompt_tokens)
-                            span.set_attribute("llm.usage.completion_tokens", usage.completion_tokens)
+                            current_span.set_attribute("llm.usage.total_tokens", usage.total_tokens)
+                            current_span.set_attribute("llm.usage.prompt_tokens", usage.prompt_tokens)
+                            current_span.set_attribute("llm.usage.completion_tokens", usage.completion_tokens)
+                    logger.debug(f"OpenAI API raw response for {request_id} (first 200 chars): {response_content[:200] if response_content else 'None'}")
+
                 else:
-                    # Placeholder for other LLM client types
-                    logger.error(f"LLM client type not recognized for API call for request {request_id}")
+                    logger.error(f"Unsupported LLM_PROVIDER '{LLM_PROVIDER}' or unrecognized API client for request {request_id}")
+                    if current_span: current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "UnsupportedLLMProvider"))
                     return None
 
-                logger.debug(f"LLM raw response for {request_id} (first 200 chars): {response_content[:200] if response_content else 'None'}")
-                if current_span and response_content: span.set_attribute("llm.response_length", len(response_content))
+                if current_span and response_content: current_span.set_attribute("llm.response_length", len(response_content))
                 return response_content
 
             except httpx.ReadTimeout as e: # Specific for httpx based clients like OpenAI's
                 logger.warning(f"LLM API call timeout (Attempt {attempt + 1}/{MAX_LLM_RETRIES}) for request {request_id}: {e}")
                 if current_span: current_span.add_event("LLM API Timeout", {"attempt": attempt + 1})
                 if attempt == MAX_LLM_RETRIES - 1: raise # Re-raise on last attempt
+            except subprocess.CalledProcessError as e: # Specific for CLI failures
+                logger.error(f"CLI tool execution failed (Attempt {attempt + 1}/{MAX_LLM_RETRIES}) for request {request_id}: {e.stderr.strip()}", exc_info=True)
+                if current_span: current_span.record_exception(e); current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, f"CLIExecutionFailed: {e.returncode}"))
+                if attempt == MAX_LLM_RETRIES - 1: raise # Re-raise on last attempt
             except Exception as e: # Catch other API errors (rate limits, auth, etc.)
-                logger.error(f"Error during LLM API call (Attempt {attempt + 1}/{MAX_LLM_RETRIES}) for request {request_id}: {e}", exc_info=True)
-                if current_span: current_span.record_exception(e)
+                logger.error(f"Error during LLM call (Attempt {attempt + 1}/{MAX_LLM_RETRIES}) for request {request_id}: {e}", exc_info=True)
+                if current_span: current_span.record_exception(e); current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "LLMCallError"))
                 if attempt == MAX_LLM_RETRIES - 1: raise # Re-raise on last attempt
 
             await asyncio.sleep(LLM_RETRY_DELAY_SECONDS * (2**attempt)) # Exponential backoff
@@ -232,7 +335,6 @@ class BuildSurfAgent:
         logger.debug(f"Attempting to parse LLM DAG output V0.2 (first 500 chars): {llm_response_text[:500]}...")
         current_span = _trace_api.get_current_span() if _trace_api else None
         try:
-            # Standardize cleaning of potential markdown code blocks
             cleaned_response = llm_response_text.strip()
             if cleaned_response.startswith("```json"): cleaned_response = cleaned_response[7:]
             if cleaned_response.endswith("```"): cleaned_response = cleaned_response[:-3]
@@ -245,7 +347,6 @@ class BuildSurfAgent:
 
             data = json.loads(cleaned_response) # Throws json.JSONDecodeError on failure
 
-            # --- Rigorous Validation ---
             if not isinstance(data, dict):
                 raise ValueError("DAG root must be a JSON object.")
 
@@ -253,8 +354,8 @@ class BuildSurfAgent:
             if not isinstance(dag_id, str) or not dag_id:
                 raise ValueError("'dag_id' field is missing or not a non-empty string.")
 
-            project_id = project_id_from_request or data.get("project_id") # Prefer request's
-            if project_id is not None and not isinstance(project_id, str): # Allow project_id to be null from LLM
+            project_id = project_id_from_request or data.get("project_id")
+            if project_id is not None and not isinstance(project_id, str):
                 raise ValueError("'project_id' field must be a string or null.")
 
             description = data.get("description", f"DAG generated for {project_id or 'unknown project'}")
@@ -287,9 +388,6 @@ class BuildSurfAgent:
                 if not isinstance(dependencies, list) or not all(isinstance(dep, str) for dep in dependencies):
                     raise ValueError(f"Node '{node_id}' has invalid 'dependencies' field; must be a list of strings.")
 
-                # Ensure all dependencies exist as other node IDs in this DAG
-                # This check will be done after all nodes are initially parsed for IDs.
-
                 node: DagNode = {
                     "id": node_id,
                     "task_type": task_type,
@@ -298,7 +396,6 @@ class BuildSurfAgent:
                     "params": node_data.get("params", {}),
                     "dependencies": dependencies
                 }
-                # Validate command and agent_handler types
                 if node["command"] is not None and (not isinstance(node["command"], list) or not all(isinstance(c, str) for c in node["command"])): #type: ignore
                     raise ValueError(f"Node '{node_id}' has invalid 'command'; must be a list of strings.")
                 if node["agent_handler"] is not None and not isinstance(node["agent_handler"], str):
@@ -308,18 +405,15 @@ class BuildSurfAgent:
 
                 validated_nodes.append(node)
 
-            # Second pass: Validate dependencies
             for node in validated_nodes:
                 for dep_id in node["dependencies"]:
                     if dep_id not in node_ids_seen:
                         raise ValueError(f"Node '{node['id']}' has an unknown dependency: '{dep_id}'.")
 
-            # TODO: Add cycle detection in DAG (more complex, V0.2+ for BuildSurfAgent)
-
             dag_def: DagDefinition = {
                 "dag_id": dag_id,
                 "project_id": project_id,
-                "description": description, # Add description to TypedDict if not there
+                "description": description,
                 "nodes": validated_nodes
             }
             logger.info(f"Successfully parsed and validated DAG definition: {dag_def['dag_id']}")
@@ -329,7 +423,7 @@ class BuildSurfAgent:
         except json.JSONDecodeError as e:
             logger.error(f"Failed to decode JSON from LLM response: {e}. Response: {cleaned_response}")
             if current_span and _trace_api: current_span.record_exception(e); current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "JSONDecodeError"))
-        except ValueError as e: # Our custom validation errors
+        except ValueError as e:
             logger.error(f"Invalid DAG structure from LLM: {e}. Response: {cleaned_response}")
             if current_span and _trace_api: current_span.record_exception(e); current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, f"InvalidDAGStructure: {e}"))
         except Exception as e: 
@@ -337,19 +431,20 @@ class BuildSurfAgent:
             if current_span and _trace_api: current_span.record_exception(e); current_span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "DAGParseUnexpectedError"))
         return None
 
-    # _generate_dag_for_request_logic needs to use _construct_llm_prompt_v2, _call_llm_api_v2, _parse_and_validate_llm_dag_output_v2
+    # _generate_dag_for_request_logic now calls _construct_llm_prompt_v2 and _call_llm_api_v2
+    # It must now expect `_construct_llm_prompt_v2` to return a dictionary
     async def _generate_dag_for_request_logic(self, request: PipelineGenerationRequestEvent):
-        # (This is the core logic from the previous V0.1 BuildSurfAgent, now using the V2 helpers)
         user_prompt_data = request["user_prompt_data"]
         request_id = request["request_id"]
         project_id = user_prompt_data.get("target_project_id")
 
-        full_llm_prompt = await self._construct_llm_prompt_v2(user_prompt_data) # Now async
-        raw_llm_response = await self._call_llm_api_v2(full_llm_prompt, request_id)
+        # Now get prompt_data which contains both prompt_text and messages
+        llm_prompt_data = await self._construct_llm_prompt_v2(user_prompt_data)
+        
+        raw_llm_response = await self._call_llm_api_v2(llm_prompt_data, request_id)
 
         if not raw_llm_response:
             logger.error(f"No response from LLM for request_id: {request_id}. Cannot generate DAG.")
-            # TODO: Publish a DagGenerationFailedEvent
             return
 
         dag_definition = await self._parse_and_validate_llm_dag_output_v2(raw_llm_response, project_id)
@@ -368,29 +463,20 @@ class BuildSurfAgent:
             else: logger.error("Cannot publish DagDefinitionCreatedEvent: EventBus not connected.")
         else:
             logger.error(f"Failed to generate a valid DAG for request_id: {request_id}.")
-            # TODO: Publish a DagGenerationFailedEvent (new event type)
-
-    # generate_dag_for_request (traced wrapper) and main_event_loop, main, if __name__ == "__main__"
-    # remain structurally similar to V0.1 (response #46), but call the _v2 methods.
-    # Ensure main_event_loop and its handlers are async and use await.
-    # For brevity, I won't re-paste the full event loop here, just assume it calls the _v2 logic.
-    # The key change is making _construct_llm_prompt_v2 async because it awaits _get_additional_context_for_llm
 
     async def generate_dag_for_request(self, request: PipelineGenerationRequestEvent): # Traced wrapper
-        span_name = "buildsurf_agent.generate_dag_for_request_traced" # Renamed to avoid conflict with logic method
+        span_name = "buildsurf_agent.generate_dag_for_request_traced"
         if not self.tracer: return await self._generate_dag_for_request_logic(request)
         with self.tracer.start_as_current_span(span_name) as span:
-            # ... (set attributes as in V0.1) ...
             span.set_attributes({ "buildsurf.request_id": request["request_id"], "buildsurf.project_id": request["user_prompt_data"].get("target_project_id", "N/A")})
             try:
                 await self._generate_dag_for_request_logic(request)
-                if _trace_api: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK)) # Assuming success if no exception
+                if _trace_api: span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
             except Exception as e:
                 if _trace_api: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Core DAG logic failed"))
-                raise # Re-raise to be caught by higher level error handlers if any
+                raise
 
     async def handle_pipeline_generation_request(self, event_data_str: str): # Event handler
-        # ... (tracing and parsing from V0.1) ...
         span = self._start_trace_span_if_available("handle_pipeline_generation_request")
         try:
             with span: #type: ignore
@@ -399,14 +485,12 @@ class BuildSurfAgent:
                     logger.error(f"Malformed event: {event_data_str[:200]}"); return
                 if _tracer: span.set_attribute("buildsurf.request_id", request_data["request_id"])
                 logger.info(f"BuildSurfAgent handling request: {request_data['request_id']}")
-                await self.generate_dag_for_request(request_data) # Call the traced wrapper
+                await self.generate_dag_for_request(request_data)
         except Exception as e:
             logger.error(f"Error in handle_pipeline_generation_request: {e}", exc_info=True)
             if _tracer and _trace_api and span: span.record_exception(e); span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
 
-
     async def main_event_loop(self):
-        # ... (Same robust event loop from V0.1 in response #46, ensuring it calls the async handler)
         if not self.event_bus.redis_client: logger.critical("BuildSurfAgent: EventBus not connected. Exiting."); await asyncio.sleep(60); return
         pubsub = self.event_bus.subscribe_to_channel(PIPELINE_REQUEST_EVENT_CHANNEL)
         if not pubsub: logger.critical(f"BuildSurfAgent: Failed to subscribe to {PIPELINE_REQUEST_EVENT_CHANNEL}. Exiting."); await asyncio.sleep(60); return
@@ -419,28 +503,21 @@ class BuildSurfAgent:
                 await asyncio.sleep(0.01) 
         except KeyboardInterrupt: logger.info("BuildSurfAgent event loop interrupted.")
         except Exception as e: logger.error(f"Critical error in BuildSurfAgent event loop: {e}", exc_info=True)
-        finally: # ... (pubsub cleanup) ...
-            logger.info("BuildSurfAgent shutting down...");
+        finally:
+            logger.info("BuildSurfAgent shutting down.");
             if pubsub:
                 try: await asyncio.to_thread(pubsub.unsubscribe, PIPELINE_REQUEST_EVENT_CHANNEL); await asyncio.to_thread(pubsub.close)
                 except: pass
             await self.http_client.aclose(); logger.info("BuildSurfAgent shutdown complete.")
 
-
-async def main_async_runner(): # Main async entry point for the agent
-    # In a real app, AgentRegistry might be fetched from a shared context or DI
-    # For now, BuildSurfAgent doesn't strictly need it for V0.2 prompt construction only.
-    # If _get_additional_context_for_llm needs live agent data, pass registry here.
-    agent_registry_instance = AgentRegistry() if AgentRegistry else None # Example instantiation
+async def main_async_runner():
+    agent_registry_instance = AgentRegistry() if AgentRegistry else None
     agent = BuildSurfAgent(agent_registry=agent_registry_instance)
     await agent.main_event_loop()
 
 if __name__ == "__main__":
-    # Add defaultdict to imports if using it in _get_additional_context_for_llm
-    from collections import defaultdict # For agent_capabilities_summary
-    # Add AgentRegistry to imports if used in __main__
+    from collections import defaultdict
     from core.agent_registry import AgentRegistry 
-
     try:
         asyncio.run(main_async_runner())
     except KeyboardInterrupt:
