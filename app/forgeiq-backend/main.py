@@ -1,5 +1,3 @@
-# File: forgeiq-backend/main.py
-
 import os
 import json
 import datetime
@@ -25,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # === Local imports specific to ForgeIQ ===
 from app.auth import get_api_key, get_private_intel_client
-from app.database import get_db, create_db_tables # IMPORT create_db_tables
+from app.database import get_db, create_db_tables
 from app.models import ForgeIQTask
 
 # === Celery App and Utilities imports ===
@@ -112,18 +110,40 @@ logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
 
 # === CORS Middleware ===
+# MODIFIED: More explicit origins and headers for robustness, especially with WebSockets
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://auto-soft-front-bq4jvjzz9-allenfounders-projects.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "https://autosoft-deployment-repo-production.up.railway.app",
-        "*" # Temporarily allow all origins - REMOVE IN PRODUCTION AFTER DEBUGGING
+        "https://auto-soft-front-bq4jvjzz9-allenfounders-projects.vercel.app", # Your Vercel Frontend URL
+        "https://autosoft-deployment-repo-production.up.railway.app", # Your Backend's own public URL (if frontend accesses it)
+        "http://localhost:3000", # Local Frontend development
+        "http://localhost:8000", # Local Backend (if frontend talks directly to it)
+        "*" # Keep for now to be broadly permissive during debugging, but list specific ones too.
+            # In production, remove '*' and rely only on explicit origins.
     ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"],
-    allow_headers=["*"],
+    allow_credentials=True, # Allow cookies, authorization headers
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"], # All standard methods
+    # Explicitly allow common headers for WebSocket handshakes and general requests.
+    # '*' should cover it, but being explicit sometimes resolves subtle issues.
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Requested-With",
+        "Accept",
+        "Origin",
+        "Sec-Fetch-Site",
+        "Sec-Fetch-Mode",
+        "Sec-Fetch-Dest",
+        # WebSocket-specific headers, usually handled by FastAPI/proxy, but included for completeness if debugging is extreme
+        "Sec-WebSocket-Key",
+        "Sec-WebSocket-Version",
+        "Sec-WebSocket-Extensions",
+        "Connection",
+        "Upgrade"
+    ],
+    # For WebSockets, `expose_headers` is typically not needed for a 403,
+    # as it's about what client can read from a successful response.
+    # But for extreme cases, consider if your proxy/FastAPI needs to expose any specific headers.
 )
 
 # === Connection Manager for WebSockets ===
@@ -134,16 +154,30 @@ class ConnectionManager:
         self.redis_client = None
 
     async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
-        logger.info(f"WebSocket connected. Total active connections: {len(self.active_connections)}")
+        try:
+            await websocket.accept() # This is where the 403 happens if rejected
+            self.active_connections.add(websocket)
+            logger.info(f"WebSocket connected. Total active connections: {len(self.active_connections)}")
+        except Exception as e:
+            logger.error(f"Failed to accept WebSocket connection: {e}", exc_info=True)
+            # Depending on the exception, you might want to log more specific details
+            # or even attempt to close the socket if it's in a bad state.
+            raise # Re-raise to ensure the connection attempt is fully logged/handled by FastAPI
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total active connections: {len(self.active_connections)}")
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info(f"WebSocket disconnected. Total active connections: {len(self.active_connections)}")
 
     async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
+        try:
+            await websocket.send_text(message)
+        except WebSocketDisconnect:
+            logger.warning(f"Failed to send message to disconnected WebSocket {websocket}. Removing.")
+            self.disconnect(websocket)
+        except Exception as e:
+            logger.error(f"Error sending message to WebSocket {websocket}: {e}")
+            self.disconnect(websocket)
 
     async def broadcast(self, message: Dict[str, Any]):
         disconnected_connections = []
@@ -154,7 +188,7 @@ class ConnectionManager:
                 disconnected_connections.append(connection)
             except Exception as e:
                 logger.error(f"Error broadcasting message to WebSocket {connection}: {e}")
-                disconnected_connections.append(connection) # Mark for removal
+                disconnected_connections.append(connection)
 
         for connection in disconnected_connections:
             self.active_connections.remove(connection)
@@ -164,7 +198,6 @@ class ConnectionManager:
         """Starts a background task to listen to Redis Pub/Sub."""
         self.redis_client = redis_client
         pubsub = self.redis_client.pubsub()
-        # Subscribe to a generic channel for all relevant task updates
         await pubsub.subscribe("forgeiq_task_updates") # This is the generic channel
 
         logger.info("Started Redis Pub/Sub listener for channel 'forgeiq_task_updates'.")
@@ -174,15 +207,14 @@ class ConnectionManager:
                 if message and message["type"] == "message":
                     data = json.loads(message["data"])
                     logger.debug(f"Received Pub/Sub message: {data}")
-                    # Broadcast the received message to all connected clients
                     await self.broadcast(data)
-                await asyncio.sleep(0.01) # Small sleep to prevent busy-waiting
+                await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 logger.info("Pub/Sub listener task cancelled.")
                 break
             except Exception as e:
                 logger.error(f"Error in Pub/Sub listener: {e}", exc_info=True)
-                await asyncio.sleep(1.0) # Wait a bit before retrying
+                await asyncio.sleep(1.0)
 
 manager = ConnectionManager() # Global instance of ConnectionManager
 
@@ -195,14 +227,9 @@ async def startup_event():
     _global_forgeiq_redis_aio_client = await get_forgeiq_redis_client()
     logger.info("✅ ForgeIQ: Database and async Redis client connected.")
 
-    # Call create_db_tables() here to ensure tables exist on startup
-    # IMPORTANT: In a real production system with existing data, you would use
-    # a proper database migration tool (like Alembic) rather than create_all()
-    # on every startup. This is fine for development or initial deployment.
     create_db_tables()
     logger.info("✅ ForgeIQ: Database tables ensured.")
 
-    # Start the Pub/Sub listener as a background task
     manager.pubsub_task = asyncio.create_task(manager.start_pubsub_listener(_global_forgeiq_redis_aio_client))
     logger.info("✅ ForgeIQ: WebSocket Pub/Sub listener started.")
 
@@ -328,15 +355,22 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
 # --- MODIFIED: Generic WebSocket Endpoint ---
 @app.websocket("/ws/tasks/updates")
 async def websocket_task_updates(websocket: WebSocket):
-    await manager.connect(websocket)
+    # The ConnectionManager.connect() method will now handle websocket.accept()
+    # and logging, and will raise an exception if it fails to accept.
     try:
+        await manager.connect(websocket)
         while True:
+            # Keep connection alive by continuously receiving messages from the client.
+            # Clients can send messages to subscribe to specific topics if needed,
+            # but for now, the server just broadcasts all relevant task updates.
             message = await websocket.receive_text()
             logger.debug(f"Received message from WebSocket client: {message}")
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        logger.info(f"WebSocket client disconnected from /ws/tasks/updates.")
     except Exception as e:
-        logger.error(f"WebSocket error in /ws/tasks/updates: {e}")
+        logger.error(f"Unhandled error in /ws/tasks/updates WebSocket: {e}", exc_info=True)
+    finally:
+        # Ensure disconnect is called even if an error occurs after connection is accepted
         manager.disconnect(websocket)
 
 
@@ -502,9 +536,6 @@ async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = D
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Starting ForgeIQ Backend...")
-    # Call create_db_tables() here to ensure tables exist on startup
-    # This is appropriate for development or initial deployment, but for production
-    # with existing data, proper database migration tools (e.g., Alembic) are recommended.
     create_db_tables()
     logger.info("✅ ForgeIQ: Database tables ensured.")
     yield
