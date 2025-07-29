@@ -7,6 +7,7 @@ fastapi==0.110.0
 uvicorn[standard]==0.29.0 # For running FastAPI & Streamlit (if using Uvicorn for Streamlit)
 pydantic==2.6.4
 prometheus_client>=0.17.0
+python-dotenv>=1.0.0
 
 # --- Data & Machine Learning ---
 sentence-transformers>=2.7.0,<3.0.0 # For CodeNavAgent embeddings
