@@ -114,7 +114,7 @@ logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://auto-soft-front-bq4jvjzz9-allenfounders-projects.vercel.app", # Your Vercel Frontend URL
+        "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app
         "https://autosoft-deployment-repo-production.up.railway.app", # Your Backend's own public URL (if frontend accesses it)
         "http://localhost:3000", # Local Frontend development
         "http://localhost:8000", # Local Backend (if frontend talks directly to it)
