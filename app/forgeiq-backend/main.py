@@ -110,40 +110,19 @@ logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
 
 # === CORS Middleware ===
-# MODIFIED: More explicit origins and headers for robustness, especially with WebSockets
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app
-        "https://autosoft-deployment-repo-production.up.railway.app", # Your Backend's own public URL (if frontend accesses it)
-        "http://localhost:3000", # Local Frontend development
-        "http://localhost:8000", # Local Backend (if frontend talks directly to it)
-        "*" # Keep for now to be broadly permissive during debugging, but list specific ones too.
-            # In production, remove '*' and rely only on explicit origins.
+        "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app", # Your Vercel Frontend URL
+        "https://autosoft-deployment-repo-production.up.railway.app", # Your Backend's own public URL
+        # All local dev origins should typically be removed in final production deployment.
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "*" # Temporarily allow all origins during debugging. REMOVE IN FINAL PRODUCTION.
     ],
-    allow_credentials=True, # Allow cookies, authorization headers
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"], # All standard methods
-    # Explicitly allow common headers for WebSocket handshakes and general requests.
-    # '*' should cover it, but being explicit sometimes resolves subtle issues.
-    allow_headers=[
-        "Authorization",
-        "Content-Type",
-        "X-Requested-With",
-        "Accept",
-        "Origin",
-        "Sec-Fetch-Site",
-        "Sec-Fetch-Mode",
-        "Sec-Fetch-Dest",
-        # WebSocket-specific headers, usually handled by FastAPI/proxy, but included for completeness if debugging is extreme
-        "Sec-WebSocket-Key",
-        "Sec-WebSocket-Version",
-        "Sec-WebSocket-Extensions",
-        "Connection",
-        "Upgrade"
-    ],
-    # For WebSockets, `expose_headers` is typically not needed for a 403,
-    # as it's about what client can read from a successful response.
-    # But for extreme cases, consider if your proxy/FastAPI needs to expose any specific headers.
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"],
+    allow_headers=["*", "Origin", "Content-Type", "Authorization", "X-Requested-With", "Accept"],
 )
 
 # === Connection Manager for WebSockets ===
@@ -155,14 +134,13 @@ class ConnectionManager:
 
     async def connect(self, websocket: WebSocket):
         try:
-            await websocket.accept() # This is where the 403 happens if rejected
+            await websocket.accept()
             self.active_connections.add(websocket)
             logger.info(f"WebSocket connected. Total active connections: {len(self.active_connections)}")
         except Exception as e:
-            logger.error(f"Failed to accept WebSocket connection: {e}", exc_info=True)
-            # Depending on the exception, you might want to log more specific details
-            # or even attempt to close the socket if it's in a bad state.
-            raise # Re-raise to ensure the connection attempt is fully logged/handled by FastAPI
+            logger.error(f"Failed to accept WebSocket connection from {websocket.client.host}:{websocket.client.port}. Error: {e}", exc_info=True)
+            if not isinstance(e, WebSocketDisconnect):
+                raise
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
@@ -198,7 +176,7 @@ class ConnectionManager:
         """Starts a background task to listen to Redis Pub/Sub."""
         self.redis_client = redis_client
         pubsub = self.redis_client.pubsub()
-        await pubsub.subscribe("forgeiq_task_updates") # This is the generic channel
+        await pubsub.subscribe("forgeiq_task_updates")
 
         logger.info("Started Redis Pub/Sub listener for channel 'forgeiq_task_updates'.")
         while True:
@@ -251,13 +229,25 @@ async def shutdown_event():
 # === Browser-accessible root route ===
 @app.get("/")
 def root():
+    # MODIFIED: Removed 'localhost' fallbacks.
+    # These environment variables MUST now be set on Railway for this service.
+    forgeiq_base_url = os.getenv("FORGEIQ_BASE_URL")
+    orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL")
+
+    if not forgeiq_base_url:
+        logger.error("FORGEIQ_BASE_URL environment variable is NOT set. Root endpoint will return incomplete data.")
+        raise ValueError("FORGEIQ_BASE_URL environment variable not set.")
+    if not orchestrator_base_url:
+        logger.error("ORCHESTRATOR_BASE_URL environment variable is NOT set. Root endpoint will return incomplete data.")
+        raise ValueError("ORCHESTRATOR_BASE_URL environment variable not set.")
+
     return {
         "message": "✅ ForgeIQ Backend is live.",
         "docs": "/docs",
         "status": "/status",
         "version": app.version,
-        "forgeiq": os.getenv("FORGEIQ_BASE_URL", "http://localhost:8000"),
-        "orchestrator": os.getenv("ORCHESTRATOR_BASE_URL", "http://localhost:8000"),
+        "forgeiq": forgeiq_base_url,
+        "orchestrator": orchestrator_base_url,
     }
 
 # === Health/status check ===
@@ -355,14 +345,9 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
 # --- MODIFIED: Generic WebSocket Endpoint ---
 @app.websocket("/ws/tasks/updates")
 async def websocket_task_updates(websocket: WebSocket):
-    # The ConnectionManager.connect() method will now handle websocket.accept()
-    # and logging, and will raise an exception if it fails to accept.
     try:
         await manager.connect(websocket)
         while True:
-            # Keep connection alive by continuously receiving messages from the client.
-            # Clients can send messages to subscribe to specific topics if needed,
-            # but for now, the server just broadcasts all relevant task updates.
             message = await websocket.receive_text()
             logger.debug(f"Received message from WebSocket client: {message}")
     except WebSocketDisconnect:
@@ -370,7 +355,6 @@ async def websocket_task_updates(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Unhandled error in /ws/tasks/updates WebSocket: {e}", exc_info=True)
     finally:
-        # Ensure disconnect is called even if an error occurs after connection is accepted
         manager.disconnect(websocket)
 
 
