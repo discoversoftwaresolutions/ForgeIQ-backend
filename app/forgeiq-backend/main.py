@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # === Local imports specific to ForgeIQ ===
 from app.auth import get_api_key, get_private_intel_client
-from app.database import get_db
+from app.database import get_db, create_db_tables # IMPORT create_db_tables
 from app.models import ForgeIQTask
 
 # === Celery App and Utilities imports ===
@@ -57,7 +57,7 @@ from .api_models import (
     TaskListResponse,
     TaskPayloadFromOrchestrator,
     SDKMCPStrategyRequestContext,
-    SDKMCPStrategyResponse, # CORRECTED TYPO HERE
+    SDKMCPStrategyResponse,
     ApplyAlgorithmResponse
 )
 
@@ -194,6 +194,14 @@ async def startup_event():
     global _global_forgeiq_redis_aio_client
     _global_forgeiq_redis_aio_client = await get_forgeiq_redis_client()
     logger.info("✅ ForgeIQ: Database and async Redis client connected.")
+
+    # Call create_db_tables() here to ensure tables exist on startup
+    # IMPORTANT: In a real production system with existing data, you would use
+    # a proper database migration tool (like Alembic) rather than create_all()
+    # on every startup. This is fine for development or initial deployment.
+    create_db_tables()
+    logger.info("✅ ForgeIQ: Database tables ensured.")
+
     # Start the Pub/Sub listener as a background task
     manager.pubsub_task = asyncio.create_task(manager.start_pubsub_listener(_global_forgeiq_redis_aio_client))
     logger.info("✅ ForgeIQ: WebSocket Pub/Sub listener started.")
@@ -202,9 +210,9 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     if manager.pubsub_task:
-        manager.pubsub_task.cancel() # Cancel the Pub/Sub listener task
+        manager.pubsub_task.cancel()
         try:
-            await manager.pubsub_task # Wait for it to actually cancel
+            await manager.pubsub_task
         except asyncio.CancelledError:
             pass
         logger.info("❌ ForgeIQ: WebSocket Pub/Sub listener stopped.")
@@ -221,9 +229,8 @@ def root():
         "docs": "/docs",
         "status": "/status",
         "version": app.version,
-        "forgeiq": os.getenv("FORGEIQ_BASE_URL", "http://localhost:8000"), # Provide backend URLs for frontend discovery
-        "orchestrator": os.getenv("ORCHESTRATOR_BASE_URL", "http://localhost:8000"), # Assuming this main.py is also the orchestrator for now
-        # Add other service URLs if they were separate (e.g., debugiq, ci_cd)
+        "forgeiq": os.getenv("FORGEIQ_BASE_URL", "http://localhost:8000"),
+        "orchestrator": os.getenv("ORCHESTRATOR_BASE_URL", "http://localhost:8000"),
     }
 
 # === Health/status check ===
@@ -319,21 +326,13 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
 
 
 # --- MODIFIED: Generic WebSocket Endpoint ---
-# This endpoint accepts a single WebSocket connection per client and relays all task updates.
 @app.websocket("/ws/tasks/updates")
 async def websocket_task_updates(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive by continuously receiving messages from the client.
-            # Clients can send messages to subscribe to specific topics if needed,
-            # but for now, the server just broadcasts all relevant task updates.
             message = await websocket.receive_text()
             logger.debug(f"Received message from WebSocket client: {message}")
-            # You could process client-sent messages here if needed (e.g., {"subscribe_task_id": "xyz"})
-            # and update a client-specific subscription map in the ConnectionManager.
-            # For this setup, we assume the client simply receives all 'forgeiq_task_updates'
-            # and filters on its side.
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
@@ -503,6 +502,11 @@ async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = D
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Starting ForgeIQ Backend...")
+    # Call create_db_tables() here to ensure tables exist on startup
+    # This is appropriate for development or initial deployment, but for production
+    # with existing data, proper database migration tools (e.g., Alembic) are recommended.
+    create_db_tables()
+    logger.info("✅ ForgeIQ: Database tables ensured.")
     yield
     logger.info("🛑 Shutting down ForgeIQ Backend...")
 
