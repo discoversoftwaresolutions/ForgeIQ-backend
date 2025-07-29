@@ -12,10 +12,13 @@ logger.setLevel(logging.INFO)
 
 # --- Redis Client Setup for ForgeIQ ---
 # Ensure this matches ForgeIQ's Redis config, possibly a different DB or instance
-# REMOVED: "redis://localhost:6379/1" fallback
+# REMOVED: "redis://localhost:6379/1" fallback from os.getenv
 REDIS_URL = os.getenv("FORGEIQ_REDIS_URL")
 
-# Explicitly check if the environment variable was set
+# Explicitly check if the environment variable was set.
+# This ensures that if the environment variable is not properly set
+# in Railway, your service will fail explicitly during startup,
+# making it clear that the configuration is missing.
 if not REDIS_URL:
     logger.error("FORGEIQ_REDIS_URL environment variable is NOT set for ForgeIQ utils. Cannot proceed without Redis URL.")
     raise ValueError("FORGEIQ_REDIS_URL environment variable not set for ForgeIQ utils.")
