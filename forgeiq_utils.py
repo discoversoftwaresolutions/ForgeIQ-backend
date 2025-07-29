@@ -40,6 +40,7 @@ async def update_forgeiq_task_state_and_notify(
 ):
     from app.database import SessionLocal # Import ForgeIQ's SessionLocal
     from app.models import ForgeIQTask # Import ForgeIQ's Task model
+    from .api_models import ForgeIQTaskStatusResponse # Import the Pydantic model for consistency
 
     db = SessionLocal()
     try:
@@ -48,35 +49,49 @@ async def update_forgeiq_task_state_and_notify(
             logger.error(f"ForgeIQTask with ID {task_id} not found in DB for update.")
             return
 
+        # Update task object with new data
         if status: task_obj.status = status
         if logs:
             if task_obj.logs: task_obj.logs += f"\n[{datetime.utcnow().isoformat()}] {logs}"
             else: task_obj.logs = f"[{datetime.utcnow().isoformat()}] {logs}"
         if current_stage: task_obj.current_stage = current_stage
         if progress is not None: task_obj.progress = progress
-        if output_data is not None: task_obj.output_data = output_data
+        if output_data is not None: 
+            # Ensure output_data is merged or set correctly.
+            if isinstance(output_data, dict) and isinstance(task_obj.output_data, dict):
+                task_obj.output_data.update(output_data)
+            else:
+                task_obj.output_data = output_data
         if details is not None:
-            if task_obj.details: task_obj.details.update(details)
-            else: task_obj.details = details
+            # Similar merging for details
+            if isinstance(details, dict) and isinstance(task_obj.details, dict):
+                task_obj.details.update(details)
+            else:
+                task_obj.details = details
         task_obj.updated_at = datetime.utcnow()
 
         db.commit()
+        db.refresh(task_obj) # Refresh to get any updated fields after commit
 
-        # Publish a lightweight update to Redis Pub/Sub for WebSockets
+        # --- MODIFIED: Publish a full update to Redis Pub/Sub for WebSockets ---
         r = await get_forgeiq_redis_client()
-        update_data = {
-            "task_id": task_id,
-            "status": status,
-            "progress": progress,
-            "current_stage": current_stage,
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        if logs: update_data["logs_snippet"] = logs
-        if output_data: update_data["output_data_summary"] = output_data.get("status") # Summarize output
-        if details: update_data["details_summary"] = details.get("error_type") # Summarize details
-
-        await r.publish(f"forgeiq_task_updates:{task_id}", json.dumps(update_data))
-        logger.info(f"ForgeIQ Task {task_id} DB state updated & Redis notified: Status={status}, Stage={current_stage}, Progress={progress}%")
+        
+        # Construct the full message payload using the Pydantic model for consistency
+        # This ensures all relevant fields are sent and the data structure is predictable
+        full_update_payload = ForgeIQTaskStatusResponse(
+            task_id=task_obj.id,
+            task_type=task_obj.task_type,
+            status=task_obj.status,
+            current_stage=task_obj.current_stage,
+            progress=task_obj.progress,
+            logs=task_obj.logs, # Send full logs (or just latest snippet, depending on need)
+            output_data=task_obj.output_data,
+            details=task_obj.details
+        )
+        
+        # PUBLISH TO THE GENERIC CHANNEL
+        await r.publish("forgeiq_task_updates", full_update_payload.json()) # Publish JSON string
+        logger.info(f"ForgeIQ Task {task_id} DB state updated & Redis notified on 'forgeiq_task_updates': Status={status}, Stage={current_stage}, Progress={progress}%")
 
     except Exception as e:
         db.rollback()
