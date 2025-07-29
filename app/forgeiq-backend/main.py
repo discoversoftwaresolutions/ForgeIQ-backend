@@ -8,7 +8,7 @@ import logging
 import asyncio
 import subprocess
 from contextlib import asynccontextmanager
-from typing import Dict, Any, Optional, List, Set # Import Set for tracking active WebSocket connections
+from typing import Dict, Any, Optional, List, Set
 
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -30,7 +30,7 @@ from app.models import ForgeIQTask
 
 # === Celery App and Utilities imports ===
 from forgeiq_celery import celery_app
-from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify # Ensure this publishes to a generic channel
+from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify
 
 # === Import ForgeIQ's internal Celery tasks ===
 from tasks.build_tasks import (
@@ -57,7 +57,7 @@ from .api_models import (
     TaskListResponse,
     TaskPayloadFromOrchestrator,
     SDKMCPStrategyRequestContext,
-    SDKMCPMCPStrategyResponse, # Fix typo from previous versions (if it existed)
+    SDKMCPStrategyResponse, # CORRECTED TYPO HERE
     ApplyAlgorithmResponse
 )
 
@@ -70,7 +70,7 @@ _tracer_main = None
 _trace_api_main = None
 try:
     from opentelemetry import trace as otel_trace_api
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelmetry.instrumentation.fastapi import FastAPIInstrumentor
 
     _tracer_main = otel_trace_api.get_tracer("ForgeIQ Backend", "1.0.0")
     _trace_api_main = otel_trace_api
@@ -119,7 +119,7 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:8000",
         "https://autosoft-deployment-repo-production.up.railway.app",
-        "*" # REMOVE IN PRODUCTION AFTER DEBUGGING - ONLY FOR DEVELOPMENT
+        "*" # Temporarily allow all origins - REMOVE IN PRODUCTION AFTER DEBUGGING
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"],
@@ -127,7 +127,6 @@ app.add_middleware(
 )
 
 # === Connection Manager for WebSockets ===
-# This class manages active WebSocket connections and broadcasting messages.
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
@@ -310,7 +309,7 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
         return JSONResponse({
             "status": "accepted",
             "message": "LLM processing started in background. Updates will be sent via WebSocket.",
-            "task_id": forgeiq_task_id # Frontend will use this to track via WS
+            "task_id": forgeiq_task_id
         })
 
     except Exception as e:
@@ -326,16 +325,19 @@ async def websocket_task_updates(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # You can optionally receive messages from the client here if they
-            # need to subscribe to specific types of updates (e.g., {"subscribe_user": "user_id"})
-            # For now, we assume all clients get all 'forgeiq_task_updates'
-            # and filter on the frontend.
-            data = await websocket.receive_text() # Keep connection alive by receiving, but ignore
-            logger.debug(f"Received message from WebSocket: {data}")
+            # Keep connection alive by continuously receiving messages from the client.
+            # Clients can send messages to subscribe to specific topics if needed,
+            # but for now, the server just broadcasts all relevant task updates.
+            message = await websocket.receive_text()
+            logger.debug(f"Received message from WebSocket client: {message}")
+            # You could process client-sent messages here if needed (e.g., {"subscribe_task_id": "xyz"})
+            # and update a client-specific subscription map in the ConnectionManager.
+            # For this setup, we assume the client simply receives all 'forgeiq_task_updates'
+            # and filters on its side.
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error in /ws/tasks/updates: {e}")
         manager.disconnect(websocket)
 
 
