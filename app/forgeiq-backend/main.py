@@ -110,7 +110,7 @@ logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
 
 # === CORS Middleware ===
-app.add_middleware
+app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app",  # Vercel frontend
@@ -118,7 +118,10 @@ app.add_middleware
         "http://localhost:8000",  # Local backend
         "https://autosoft-deployment-repo-production.up.railway.app",  # Production backend
     ],
-    
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)    
     # === Connection Manager for WebSockets ===
 class ConnectionManager:
     def __init__(self):
