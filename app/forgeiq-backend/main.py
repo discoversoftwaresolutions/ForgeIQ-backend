@@ -110,7 +110,7 @@ logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
 
 # === CORS Middleware ===
-app.add_middleware(
+app.add_middleware
     CORSMiddleware,
     allow_origins=[
         "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app",  # Vercel frontend
