@@ -113,14 +113,10 @@ logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app", # Your Vercel Frontend URL
-        "https://autosoft-deployment-repo-production.up.railway.app", # Your Backend's own public URL
-        
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"],
-    allow_headers=["*", "Origin", "Content-Type", "Authorization", "X-Requested-With", "Accept"],
-)
+        "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app",  # Vercel frontend
+        "http://localhost:3000",  # Local frontend
+        "http://localhost:8000",  # Local backend
+        "https://autosoft-deployment-repo-production.up.railway.app",  # Production backend
 
 # === Connection Manager for WebSockets ===
 class ConnectionManager:
