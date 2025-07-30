@@ -117,8 +117,9 @@ app.add_middleware(
         "http://localhost:3000",  # Local frontend
         "http://localhost:8000",  # Local backend
         "https://autosoft-deployment-repo-production.up.railway.app",  # Production backend
-
-# === Connection Manager for WebSockets ===
+    ],
+    
+    # === Connection Manager for WebSockets ===
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
