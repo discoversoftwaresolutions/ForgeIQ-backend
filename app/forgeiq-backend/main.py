@@ -299,7 +299,6 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
         raise HTTPException(status_code=500, detail=f"Failed to initiate ForgeIQ build task: {e}")
 
 
-# --- MODIFIED: /gateway Endpoint (asynchronous dispatch) ---
 @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
     """
@@ -307,8 +306,14 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
     Dispatches a Celery task and immediately returns a task ID.
     The frontend should track progress via a central WebSocket listener.
     """
+    if not request_data.prompt or len(request_data.prompt.strip()) == 0:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+
     forgeiq_task_id = str(uuid.uuid4())
-    
+    session_id = request_data.session_id or str(uuid.uuid4())
+    request_payload = request_data.dict()
+    request_payload["session_id"] = session_id
+
     try:
         new_forgeiq_task = ForgeIQTask(
             id=forgeiq_task_id,
@@ -316,7 +321,7 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
             status="pending",
             progress=0,
             current_stage="Queued for LLM processing",
-            payload=request_data.dict(),
+            payload=request_payload,
             logs="LLM request received and queued for processing."
         )
         db.add(new_forgeiq_task)
@@ -325,19 +330,21 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
 
         logger.info(f"Gateway: Dispatching LLM request for task ID: {forgeiq_task_id}. Prompt: '{request_data.prompt[:50]}'")
 
-        run_codex_generation_task.delay(request_data.dict(), forgeiq_task_id)
-        
+        run_codex_generation_task.delay(request_payload, forgeiq_task_id)
+
         return JSONResponse({
             "status": "accepted",
             "message": "LLM processing started in background. Updates will be sent via WebSocket.",
-            "task_id": forgeiq_task_id
+            "task_id": forgeiq_task_id,
+            "session_id": session_id,
+            "task_type": "llm_chat_response",
+            "timestamp": datetime.utcnow().isoformat()
         })
 
     except Exception as e:
         db.rollback()
         logger.exception(f"ForgeIQ Gateway: Error initiating LLM task for prompt: '{request_data.prompt}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate LLM task: {e}")
-
 
 # --- MODIFIED: Generic WebSocket Endpoint ---
 @app.websocket("/ws/tasks/updates")
