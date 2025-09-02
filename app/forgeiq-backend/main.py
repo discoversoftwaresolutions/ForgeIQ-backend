@@ -8,14 +8,16 @@ import subprocess
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List, Set
 
-from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect, APIRouter, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 import httpx
+import stripe
 
 # === Configure Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -56,7 +58,8 @@ from .api_models import (
     TaskPayloadFromOrchestrator,
     SDKMCPStrategyRequestContext,
     SDKMCPStrategyResponse,
-    ApplyAlgorithmResponse
+    ApplyAlgorithmResponse,
+    DemoRequestPayload # Ensure DemoRequestPayload is imported
 )
 
 # === Internal ForgeIQ components ===
@@ -194,6 +197,7 @@ class ConnectionManager:
 manager = ConnectionManager() # Global instance of ConnectionManager
 
 
+# This endpoint is called from the public demo page
 @app.post("/demo/pipeline", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
@@ -222,7 +226,6 @@ async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends
         "message": "Demo pipeline started. Check WebSocket for updates.",
         "forgeiq_task_id": forgeiq_task_id
     }
-
 
 
 # === Global Async Redis Client instance for ForgeIQ ===
@@ -370,7 +373,7 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
             "task_id": forgeiq_task_id,
             "session_id": session_id,
             "task_type": "llm_chat_response",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.datetime.utcnow().isoformat()
         })
 
     except Exception as e:
@@ -552,6 +555,58 @@ async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = D
     )
 
 
+# === New: Stripe Endpoints for Billing ===
+billing_router = APIRouter(tags=["Billing"])
+
+class CreateCheckoutSessionRequest(BaseModel):
+    priceId: str
+    
+class CreateCheckoutSessionResponse(BaseModel):
+    id: str
+
+@billing_router.post("/api/create-checkout-session", response_model=CreateCheckoutSessionResponse)
+async def create_checkout_session(request_data: CreateCheckoutSessionRequest):
+    stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price": request_data.priceId,
+                    "quantity": 1,
+                }
+            ],
+            mode="subscription",
+            success_url="https://your-frontend-domain.com/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://your-frontend-domain.com/cancel",
+        )
+        return CreateCheckoutSessionResponse(id=checkout_session.id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@billing_router.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        return JSONResponse(content={"detail": str(e)}, status_code=400)
+    except stripe.error.SignatureVerificationError as e:
+        return JSONResponse(content={"detail": str(e)}, status_code=400)
+    
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        print("Payment received for session: " + session.id)
+    elif event['type'] == 'invoice.payment_succeeded':
+        print("Subscription payment successful!")
+    return JSONResponse(content={"status": "success"}, status_code=200)
+
+
 # === Lifecycle events ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -567,3 +622,6 @@ app.router.lifespan_context = lifespan
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+# Include the billing router at the end
+app.include_router(billing_router)
