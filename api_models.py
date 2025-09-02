@@ -7,10 +7,10 @@ import uuid # Needed for default_factory in Field
 # --- Request Models for ForgeIQ Endpoints ---
 
 class UserPromptData(BaseModel):
-    """
+    
     Model representing a user's prompt and associated context
     for various AI-driven operations.
-    """
+   
     prompt: str = Field(..., description="The natural language prompt from the user.")
     project_id: str = Field(..., description="The ID of the project this prompt relates to.")
     user_id: Optional[str] = Field(None, description="Optional ID of the user submitting the prompt.")
@@ -18,7 +18,7 @@ class UserPromptData(BaseModel):
 
 # NEW: Model for the one-page app's demo endpoint
 class DemoRequestPayload(BaseModel):
-    """
+    
     Payload for the demo endpoint, carrying a simple prompt.
     """
     prompt: str = Field(..., description="The user's prompt for the live demo.")
@@ -26,26 +26,26 @@ class DemoRequestPayload(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 class CodeGenerationRequest(BaseModel):
-    """
+    
     Request model for the /code_generation endpoint.
-    """
+    
     project_id: str
     prompt_text: str
     config_options: Dict[str, Any] = {}
 
 class PipelineGenerateRequest(BaseModel):
-    """
+    
     Request model for the /pipeline_generate endpoint.
-    """
+    
     project_id: str
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     pipeline_type: str
     context: Dict[str, Any] = {}
 
 class DeploymentTriggerRequest(BaseModel):
-    """
+   
     Request model for the /deploy_service endpoint.
-    """
+    
     service_name: str
     project_id: str
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -53,17 +53,17 @@ class DeploymentTriggerRequest(BaseModel):
     deployment_env: Optional[str] = None
 
 class ApplyAlgorithmRequest(BaseModel):
-    """
+    
     Request model for the /api/forgeiq/algorithms/apply endpoint.
-    """
+    
     algorithm_id: str # e.g., "CABGP", "LLM_OPTIMIZED_DAG"
     project_id: str
     context_data: Dict[str, Any]
 
 class MCPStrategyApiRequest(BaseModel):
-    """
+    
     Request model for the /api/forgeiq/mcp/optimize-strategy/{project_id} endpoint.
-    """
+    
     current_dag_snapshot: Optional[List[Dict[str, Any]]] = None # Simplified; could be Pydantic model for DAG nodes
     optimization_goal: str = "general_build_efficiency"
     additional_mcp_context: Dict[str, Any] = {}
@@ -72,9 +72,9 @@ class MCPStrategyApiRequest(BaseModel):
 # --- Response Models for ForgeIQ Endpoints ---
 
 class ProjectConfigResponse(BaseModel):
-    """
+    
     Response model for project configuration details.
-    """
+    
     project_id: str
     name: str
     config_version: str
