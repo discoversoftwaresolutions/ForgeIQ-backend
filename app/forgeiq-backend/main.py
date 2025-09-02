@@ -193,6 +193,38 @@ class ConnectionManager:
 
 manager = ConnectionManager() # Global instance of ConnectionManager
 
+
+@app.post("/demo/pipeline", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
+async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends(get_db)):
+    forgeiq_task_id = str(uuid.uuid4())
+    
+    # Create a new task in the database for tracking
+    new_forgeiq_task = ForgeIQTask(
+        id=forgeiq_task_id,
+        task_type="demo_pipeline",
+        status="pending",
+        progress=0,
+        current_stage="Queued",
+        payload=payload.dict(),
+        logs="Demo pipeline task received and queued."
+    )
+    db.add(new_forgeiq_task)
+    db.commit()
+    db.refresh(new_forgeiq_task)
+    
+    # Trigger the Celery task. The task itself will use the SDK internally.
+    run_forgeiq_pipeline_task.delay(payload.dict(), forgeiq_task_id)
+
+    logger.info(f"Demo pipeline started. Internal Task ID: {forgeiq_task_id}")
+
+    return {
+        "status": "accepted",
+        "message": "Demo pipeline started. Check WebSocket for updates.",
+        "forgeiq_task_id": forgeiq_task_id
+    }
+
+
+
 # === Global Async Redis Client instance for ForgeIQ ===
 _global_forgeiq_redis_aio_client = None
 
