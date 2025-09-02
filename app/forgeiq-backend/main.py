@@ -107,19 +107,22 @@ app = FastAPI(
 logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
 
-# === CORS Middleware ===
+
+ALLOWED_ORIGINS = [
+    "https://forgeiq-production.up.railway.app",          # ← your frontend
+    "http://localhost:3000", "http://localhost:5173",     # dev
+    # add others you actually use
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://auto-soft-front-io6tzy2gj-allenfounders-projects.vercel.app",  # Vercel frontend
-        "http://localhost:3000",  # Local frontend
-        "http://localhost:8000",  # Local backend
-        "https://autosoft-deployment-repo-production.up.railway.app",  # Production backend
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
-)    
+    allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
+)
     # === Connection Manager for WebSockets ===
 class ConnectionManager:
     def __init__(self):
