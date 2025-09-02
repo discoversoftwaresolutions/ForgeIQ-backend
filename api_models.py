@@ -148,9 +148,9 @@ class SDKDeploymentStatusModel(BaseModel): # Example for SDK response
     status: str
 
 class BuildGraphNodeModel(BaseModel):
-    """
+    
     A conceptual model for a node (task) within a build DAG.
-    """
+    
     id: str = Field(..., description="Unique task ID within the DAG.")
     task_type: str = Field(..., description="Type of task (e.g., 'lint', 'test', 'build', 'deploy').")
     command: Optional[List[str]] = Field(None, description="Command to execute this task.")
@@ -159,9 +159,9 @@ class BuildGraphNodeModel(BaseModel):
     dependencies: List[str] = Field([], description="List of IDs of tasks this node depends on.")
 
 class BuildGraphResponse(BaseModel):
-    """
+    
     Response model containing a generated or optimized build graph (DAG).
-    """
+    
     dag_id: str = Field(..., description="ID of the generated/optimized DAG.")
     project_id: str = Field(..., description="ID of the project the DAG belongs to.")
     description: Optional[str] = Field(None, description="Description of the DAG.")
