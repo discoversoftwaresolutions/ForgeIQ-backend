@@ -33,38 +33,33 @@ from forgeiq_celery import celery_app
 from forgeiq_utils import get_forgeiq_redis_client, update_forgeiq_task_state_and_notify
 
 # === Import ForgeIQ's internal Celery tasks ===
-from tasks.build_tasks import (
-    run_codex_generation_task,
-    run_forgeiq_pipeline_task,
-    run_pipeline_generation_task,
-    run_deployment_trigger_task
-)
+from tasks.build_tasks import run_codex_generation_task
+from tasks.build_tasks import run_forgeiq_pipeline_task
+from tasks.build_tasks import run_pipeline_generation_task
+from tasks.build_tasks import run_deployment_trigger_task
 
 # === Import ForgeIQ's API Models ===
-from .api_models import (
-    UserPromptData,
-    CodeGenerationRequest,
-    PipelineGenerateRequest,
-    DeploymentTriggerRequest,
-    ApplyAlgorithmRequest,
-    MCPStrategyApiRequest,
-    MCPStrategyApiResponse,
-    ProjectConfigResponse,
-    BuildGraphNodeModel,
-    BuildGraphResponse,
-    ForgeIQTaskStatusResponse,
-    TaskDefinitionModel,
-    TaskListResponse,
-    TaskPayloadFromOrchestrator,
-    SDKMCPStrategyRequestContext,
-    SDKMCPStrategyResponse,
-    ApplyAlgorithmResponse,
-    DemoRequestPayload,
-)
+from .api_models import UserPromptData
+from .api_models import CodeGenerationRequest
+from .api_models import PipelineGenerateRequest
+from .api_models import DeploymentTriggerRequest
+from .api_models import ApplyAlgorithmRequest
+from .api_models import MCPStrategyApiRequest
+from .api_models import MCPStrategyApiResponse
+from .api_models import ProjectConfigResponse
+from .api_models import BuildGraphNodeModel
+from .api_models import BuildGraphResponse
+from .api_models import ForgeIQTaskStatusResponse
+from .api_models import TaskDefinitionModel
+from .api_models import TaskListResponse
+from .api_models import TaskPayloadFromOrchestrator
+from .api_models import SDKMCPStrategyRequestContext
+from .api_models import SDKMCPStrategyResponse
+from .api_models import ApplyAlgorithmResponse
+from .api_models import DemoRequestPayload  # <-- This import is crucial for the demo endpoint
 
 # === Internal ForgeIQ components ===
 from app.orchestrator import Orchestrator
-
 
 # === OpenTelemetry (optional) ===
 _tracer_main = None
