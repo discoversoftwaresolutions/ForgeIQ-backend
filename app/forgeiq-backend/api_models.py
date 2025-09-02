@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
-import uuid # Needed for default_factory in Field
+import uuid  # Needed for default_factory in Field
 
 # --- Request Models for ForgeIQ Endpoints ---
 
@@ -18,6 +18,15 @@ class UserPromptData(BaseModel):
     project_id: Optional[str] = Field(None, description="The ID of the project this prompt relates to.")
     user_id: Optional[str] = Field(None, description="Optional ID of the user submitting the prompt.")
     context_data: Dict[str, Any] = Field({}, description="Additional context or metadata related to the prompt.")
+
+# NEW: Model for the one-page app's demo endpoint
+class DemoRequestPayload(BaseModel):
+    """
+    Payload for the demo endpoint, carrying a simple prompt.
+    """
+    prompt: str = Field(..., description="The user's prompt for the live demo.")
+    # You can add a session_id here if needed to track demo sessions.
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 class CodeGenerationRequest(BaseModel):
     """
@@ -50,7 +59,7 @@ class ApplyAlgorithmRequest(BaseModel):
     """
     Request model for the /api/forgeiq/algorithms/apply endpoint.
     """
-    algorithm_id: str # e.g., "CABGP", "LLM_OPTIMIZED_DAG"
+    algorithm_id: str  # e.g., "CABGP", "LLM_OPTIMIZED_DAG"
     project_id: str
     context_data: Dict[str, Any]
 
@@ -58,9 +67,10 @@ class MCPStrategyApiRequest(BaseModel):
     """
     Request model for the /api/forgeiq/mcp/optimize-strategy/{project_id} endpoint.
     """
-    current_dag_snapshot: Optional[List[Dict[str, Any]]] = None # Simplified; could be Pydantic model for DAG nodes
+    current_dag_snapshot: Optional[List[Dict[str, Any]]] = None  # Simplified; could be Pydantic model for DAG nodes
     optimization_goal: str = "general_build_efficiency"
     additional_mcp_context: Dict[str, Any] = {}
+
 
 # --- Response Models for ForgeIQ Endpoints ---
 
@@ -90,13 +100,13 @@ class ApplyAlgorithmResponse(BaseModel):
 
 class MCPStrategyApiDetails(BaseModel):
     strategy_id: str
-    new_dag_definition_raw: Optional[Dict[str, Any]] = None # Raw JSON dict of the new DAG
+    new_dag_definition_raw: Optional[Dict[str, Any]] = None  # Raw JSON dict of the new DAG
     directives: Optional[List[str]] = None
     mcp_metadata: Optional[Dict[str, Any]] = None
 
 class MCPStrategyApiResponse(BaseModel):
     project_id: str
-    status: str # e.g., "strategy_provided", "no_strategy"
+    status: str  # e.g., "strategy_provided", "no_strategy"
     message: Optional[str] = None
     strategy_details: Optional[MCPStrategyApiDetails] = None
 
@@ -109,20 +119,20 @@ class SDKMCPStrategyRequestContext(BaseModel):
     additional_mcp_context: Dict[str, Any] = {}
 
 class SDKMCPStrategyResponse(BaseModel):
-    status: str # "strategy_provided", "unavailable"
+    status: str  # "strategy_provided", "unavailable"
     message: Optional[str] = None
     strategy_id: Optional[str] = None
     strategy_details: Optional[MCPStrategyApiDetails] = None
 
-class SDKTaskStatusModel(BaseModel): # Example for SDK response
+class SDKTaskStatusModel(BaseModel):  # Example for SDK response
     task_id: str
     status: str
 
-class SDKDagExecutionStatusModel(BaseModel): # Example for SDK response
+class SDKDagExecutionStatusModel(BaseModel):  # Example for SDK response
     dag_id: str
     status: str
 
-class SDKDeploymentStatusModel(BaseModel): # Example for SDK response
+class SDKDeploymentStatusModel(BaseModel):  # Example for SDK response
     deployment_id: str
     status: str
 
@@ -161,7 +171,7 @@ class ForgeIQTaskStatusResponse(BaseModel):
     current_stage: Optional[str] = None
     progress: int = 0
     logs: Optional[str] = None
-    output_data: Optional[Dict[str, Any]] = None # This will contain the 'llm_response'
+    output_data: Optional[Dict[str, Any]] = None  # This will contain the 'llm_response'
     details: Optional[Dict[str, Any]] = None
 
 # Models used by /task_list endpoint
@@ -174,9 +184,9 @@ class TaskListResponse(BaseModel):
 
 # TaskPayload from Autosoft Orchestrator
 class TaskPayloadFromOrchestrator(BaseModel):
-    task_id: str # This is the Orchestrator's task_id
-    type: str # e.g., "orchestrate", "build"
-    payload: Dict[str, Any] # The actual payload relevant to ForgeIQ (e.g., project_id, prompt_text)
+    task_id: str  # This is the Orchestrator's task_id
+    type: str  # e.g., "orchestrate", "build"
+    payload: Dict[str, Any]  # The actual payload relevant to ForgeIQ (e.g., project_id, prompt_text)
     status: str = "pending"
     logs: str = ""
     output_url: str = ""
