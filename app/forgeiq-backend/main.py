@@ -66,10 +66,11 @@ _tracer_main = None
 _trace_api_main = None
 try:
     from opentelemetry import trace as otel_trace_api
-    from opentelmetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # fixed typo
 
     _tracer_main = otel_trace_api.get_tracer("ForgeIQ Backend", "1.0.0")
     _trace_api_main = otel_trace_api
+
     class NoOpSpan:
         def __enter__(self): return self
         def __exit__(self, et, ev, tb): pass
@@ -106,24 +107,28 @@ app = FastAPI(
 )
 logger.info("✅ Initializing ForgeIQ Backend FastAPI app.")
 
-
-
+# === CORS ===
 ALLOWED_ORIGINS = [
-    "https://forgeiq-production.up.railway.app",          # ← your frontend
-    "http://localhost:3000", "http://localhost:5173",     # dev
-    # add others you actually use
+    "https://forgeiq-production.up.railway.app",          # Frontend (prod)
+    "http://localhost:3000",
+    "http://localhost:5173",
+    # add other real frontends as needed
 ]
+# Optionally allow all Railway preview frontends for this app (uncomment if you actually need it)
+# ALLOW_ORIGIN_REGEX = r"https://forgeiq-.*\.up\.railway\.app"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    # allow_origin_regex=ALLOW_ORIGIN_REGEX,  # <- use instead of allow_origins if you need previews
     allow_credentials=True,
-    allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
     max_age=86400,
 )
-    # === Connection Manager for WebSockets ===
+
+# === Connection Manager for WebSockets ===
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
@@ -136,7 +141,10 @@ class ConnectionManager:
             self.active_connections.add(websocket)
             logger.info(f"WebSocket connected. Total active connections: {len(self.active_connections)}")
         except Exception as e:
-            logger.error(f"Failed to accept WebSocket connection from {websocket.client.host}:{websocket.client.port}. Error: {e}", exc_info=True)
+            client = getattr(websocket, "client", None)
+            host = getattr(client, "host", "?") if client else "?"
+            port = getattr(client, "port", "?") if client else "?"
+            logger.error(f"Failed to accept WebSocket connection from {host}:{port}. Error: {e}", exc_info=True)
             if not isinstance(e, WebSocketDisconnect):
                 raise
 
@@ -157,7 +165,7 @@ class ConnectionManager:
 
     async def broadcast(self, message: Dict[str, Any]):
         disconnected_connections = []
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
             except WebSocketDisconnect:
@@ -167,7 +175,7 @@ class ConnectionManager:
                 disconnected_connections.append(connection)
 
         for connection in disconnected_connections:
-            self.active_connections.remove(connection)
+            self.active_connections.discard(connection)
         logger.debug(f"Broadcasted message. Remaining active connections: {len(self.active_connections)}")
 
     async def start_pubsub_listener(self, redis_client):
@@ -192,15 +200,13 @@ class ConnectionManager:
                 logger.error(f"Error in Pub/Sub listener: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
 
-manager = ConnectionManager() # Global instance of ConnectionManager
+manager = ConnectionManager()  # Global instance
 
-
-# This endpoint is called from the public demo page
+# --- Public demo endpoint ---
 @app.post("/demo/pipeline", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
-    
-    # Create a new task in the database for tracking
+
     new_forgeiq_task = ForgeIQTask(
         id=forgeiq_task_id,
         task_type="demo_pipeline",
@@ -213,10 +219,8 @@ async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends
     db.add(new_forgeiq_task)
     db.commit()
     db.refresh(new_forgeiq_task)
-    
-    # Trigger the Celery task. The task itself will use the SDK internally.
-    run_forgeiq_pipeline_task.delay(payload.dict(), forgeiq_task_id)
 
+    run_forgeiq_pipeline_task.delay(payload.dict(), forgeiq_task_id)
     logger.info(f"Demo pipeline started. Internal Task ID: {forgeiq_task_id}")
 
     return {
@@ -224,7 +228,6 @@ async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends
         "message": "Demo pipeline started. Check WebSocket for updates.",
         "forgeiq_task_id": forgeiq_task_id
     }
-
 
 # === Global Async Redis Client instance for ForgeIQ ===
 _global_forgeiq_redis_aio_client = None
@@ -241,7 +244,6 @@ async def startup_event():
     manager.pubsub_task = asyncio.create_task(manager.start_pubsub_listener(_global_forgeiq_redis_aio_client))
     logger.info("✅ ForgeIQ: WebSocket Pub/Sub listener started.")
 
-
 @app.on_event("shutdown")
 async def shutdown_event():
     if manager.pubsub_task:
@@ -255,12 +257,9 @@ async def shutdown_event():
         await _global_forgeiq_redis_aio_client.close()
         logger.info("❌ ForgeIQ: Redis client closed.")
 
-
 # === Browser-accessible root route ===
 @app.get("/")
 def root():
-    # MODIFIED: Removed 'localhost' fallbacks.
-    # These environment variables MUST now be set on Railway for this service.
     forgeiq_base_url = os.getenv("FORGEIQ_BASE_URL")
     orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL")
 
@@ -297,12 +296,11 @@ async def api_status(db: Session = Depends(get_db)):
         logger.error(f"ForgeIQ health check failed: {e}")
         raise HTTPException(status_code=500, detail={"status": "unhealthy", "details": str(e)})
 
-
 # --- Primary Build Endpoint (Called by Autosoft Orchestrator) ---
 @app.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPayloadFromOrchestrator, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
-    
+
     try:
         new_forgeiq_task = ForgeIQTask(
             id=forgeiq_task_id,
@@ -330,7 +328,6 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
         db.rollback()
         logger.exception(f"ForgeIQ: Error initiating build task for {forgeiq_task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate ForgeIQ build task: {e}")
-
 
 @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
@@ -379,14 +376,14 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
         logger.exception(f"ForgeIQ Gateway: Error initiating LLM task for prompt: '{request_data.prompt}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate LLM task: {e}")
 
-# --- MODIFIED: Generic WebSocket Endpoint ---
+# --- Generic WebSocket Endpoint ---
 @app.websocket("/ws/tasks/updates")
 async def websocket_task_updates(websocket: WebSocket):
     try:
         await manager.connect(websocket)
         while True:
-            message = await websocket.receive_text()
-            logger.debug(f"Received message from WebSocket client: {message}")
+            # keepalive: receive and ignore; or implement ping/pong if desired
+            _ = await websocket.receive_text()
     except WebSocketDisconnect:
         logger.info(f"WebSocket client disconnected from /ws/tasks/updates.")
     except Exception as e:
@@ -394,13 +391,11 @@ async def websocket_task_updates(websocket: WebSocket):
     finally:
         manager.disconnect(websocket)
 
-
 # --- Offloaded Endpoints (dispatch Celery tasks) ---
-
 @app.post("/code_generation", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def generate_code_endpoint(request: CodeGenerationRequest, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
-    
+
     try:
         new_forgeiq_task = ForgeIQTask(
             id=forgeiq_task_id,
@@ -422,7 +417,6 @@ async def generate_code_endpoint(request: CodeGenerationRequest, db: Session = D
         db.rollback()
         logger.exception(f"ForgeIQ: Error initiating code generation task {forgeiq_task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate code generation task: {e}")
-
 
 @app.post("/pipeline_generate", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def generate_pipeline_endpoint(request: PipelineGenerateRequest, db: Session = Depends(get_db)):
@@ -450,7 +444,6 @@ async def generate_pipeline_endpoint(request: PipelineGenerateRequest, db: Sessi
         logger.exception(f"ForgeIQ: Error initiating pipeline generation task {forgeiq_task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate pipeline generation task: {e}")
 
-
 @app.post("/deploy_service", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def deploy_service_endpoint(request: DeploymentTriggerRequest, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
@@ -477,63 +470,6 @@ async def deploy_service_endpoint(request: DeploymentTriggerRequest, db: Session
         logger.exception(f"ForgeIQ: Error initiating deployment task {forgeiq_task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate deployment task: {e}")
 
-
-# --- Existing Endpoints (remain largely unchanged, rely on external calls) ---
-@app.post("/api/forgeiq/mcp/optimize-strategy/{project_id}", response_model=MCPStrategyApiResponse)
-async def mcp_optimize_strategy_endpoint(
-    project_id: str,
-    request_data: MCPStrategyApiRequest,
-    intel_stack_client: httpx.AsyncClient = Depends(get_private_intel_client),
-    api_key: str = Depends(get_api_key)
-):
-    if not intel_stack_client:
-        raise HTTPException(status_code=503, detail="MCP service client unavailable.")
-    try:
-        orchestrator_instance = Orchestrator(forgeiq_sdk_client=intel_stack_client, message_router=None)
-        mcp_response_data = await orchestrator_instance.request_mcp_strategy_optimization(
-            project_id=project_id,
-            current_dag=None
-        )
-        if not mcp_response_data:
-            raise HTTPException(status_code=500, detail="MCP strategy optimization returned no data.")
-        
-        return MCPStrategyApiResponse(**mcp_response_data)
-    except Exception as e:
-        logger.error(f"ForgeIQ: Error in MCP optimize strategy endpoint: {e}")
-        raise HTTPException(status_code=500, detail=f"ForgeIQ MCP exception: {str(e)}")
-
-
-@app.post("/api/forgeiq/algorithms/apply", response_model=ApplyAlgorithmResponse)
-async def apply_proprietary_algorithm_endpoint(
-    request_data: ApplyAlgorithmRequest,
-    intel_stack_client: httpx.AsyncClient = Depends(get_private_intel_client),
-    api_key: str = Depends(get_api_key)
-):
-    if not intel_stack_client:
-        raise HTTPException(status_code=503, detail="Algorithm service client unavailable.")
-    try:
-        response = await intel_stack_client.post("/invoke_proprietary_algorithm", json={
-            "algorithm_id": request_data.algorithm_id,
-            "project_id": request_data.project_id,
-            "context_data": request_data.context_data
-        })
-        response.raise_for_status()
-        return ApplyAlgorithmResponse(**response.json())
-    except httpx.HTTPStatusError as e:
-        logger.error(f"ForgeIQ: HTTP error applying algorithm: {e.response.status_code} - {e.response.text[:200]}")
-        raise HTTPException(status_code=502, detail=f"Algorithm service error: {e.response.text[:200]}")
-    except Exception as e:
-        logger.error(f"ForgeIQ: Error applying proprietary algorithm: {e}")
-        raise HTTPException(status_code=500, detail=f"Error calling private algorithm: {str(e)}")
-
-
-@app.get("/task_list", response_model=TaskListResponse)
-def get_tasks():
-    from .index import TASK_COMMANDS # Assuming TASK_COMMANDS is defined here
-    tasks = [TaskDefinitionModel(task_name=k, command_details=v) for k, v in TASK_COMMANDS.items()]
-    return TaskListResponse(tasks=tasks)
-
-
 # --- Internal ForgeIQ Task Status REST Endpoint (for polling if WS fails) ---
 @app.get("/forgeiq/status/{forgeiq_task_id}", response_model=ForgeIQTaskStatusResponse)
 async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = Depends(get_db)):
@@ -552,31 +488,28 @@ async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = D
         details=task.details if task.details else {}
     )
 
-
-# === New: Stripe Endpoints for Billing ===
+# === Billing (Stripe) ===
 billing_router = APIRouter(tags=["Billing"])
 
 class CreateCheckoutSessionRequest(BaseModel):
     priceId: str
-    
+
 class CreateCheckoutSessionResponse(BaseModel):
     id: str
 
 @billing_router.post("/api/create-checkout-session", response_model=CreateCheckoutSessionResponse)
 async def create_checkout_session(request_data: CreateCheckoutSessionRequest):
     stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+    frontend_success = os.getenv("FRONTEND_SUCCESS_URL", "https://forgeiq-production.up.railway.app/success?session_id={CHECKOUT_SESSION_ID}")
+    frontend_cancel  = os.getenv("FRONTEND_CANCEL_URL", "https://forgeiq-production.up.railway.app/cancel")
+
     try:
         checkout_session = stripe.checkout.Session.create(
             payment_method_types=["card"],
-            line_items=[
-                {
-                    "price": request_data.priceId,
-                    "quantity": 1,
-                }
-            ],
+            line_items=[{"price": request_data.priceId, "quantity": 1}],
             mode="subscription",
-            success_url="https://your-frontend-domain.com/success?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url="https://your-frontend-domain.com/cancel",
+            success_url=frontend_success,
+            cancel_url=frontend_cancel,
         )
         return CreateCheckoutSessionResponse(id=checkout_session.id)
     except Exception as e:
@@ -589,21 +522,18 @@ async def stripe_webhook(request: Request):
     sig_header = request.headers.get("stripe-signature")
 
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, WEBHOOK_SECRET
-        )
+        event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
     except ValueError as e:
         return JSONResponse(content={"detail": str(e)}, status_code=400)
     except stripe.error.SignatureVerificationError as e:
         return JSONResponse(content={"detail": str(e)}, status_code=400)
-    
+
     if event['type'] == 'checkout.session.completed':
         session = event['data']['object']
-        print("Payment received for session: " + session.id)
+        logger.info("Payment received for session: %s", session.get("id"))
     elif event['type'] == 'invoice.payment_succeeded':
-        print("Subscription payment successful!")
+        logger.info("Subscription payment successful!")
     return JSONResponse(content={"status": "success"}, status_code=200)
-
 
 # === Lifecycle events ===
 @asynccontextmanager
@@ -616,10 +546,10 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
+# Include the billing router
+app.include_router(billing_router)
+
 # === Run Server for Local Dev ===
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-# Include the billing router at the end
-app.include_router(billing_router)
