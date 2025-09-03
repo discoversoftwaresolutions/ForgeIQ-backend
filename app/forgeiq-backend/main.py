@@ -126,12 +126,17 @@ app.add_middleware(
 
 # === Soketi / Pusher-compatible configuration ===
 SOKETI_APP_ID = os.getenv("SOKETI_APP_ID", "forgeiq")
-SOKETI_KEY = os.getenv("SOKETI_KEY", "local")
-SOKETI_SECRET = os.getenv("SOKETI_SECRET", "secret")
+SOKETI_KEY = os.getenv("SOKETI_KEY", "local")                 # public key used by client + auth
+SOKETI_SECRET = os.getenv("SOKETI_SECRET", "secret")          # keep secret on server
 SOKETI_HOST = os.getenv("SOKETI_HOST", "soketi-forgeiq-production.up.railway.app")
 SOKETI_PORT = int(os.getenv("SOKETI_PORT", "443"))
 SOKETI_TLS = os.getenv("SOKETI_TLS", "true").lower() == "true"
-PUSHER_CLUSTER = os.getenv("PUSHER_CLUSTER", "mt1")  # client-side required field
+PUSHER_CLUSTER = os.getenv("PUSHER_CLUSTER", "mt1")           # client-side required field
+
+# === LLM provider defaults (for transparency/config UI) ===
+LLM_PROVIDER_PRIORITY = os.getenv("LLM_PROVIDER_PRIORITY", "openai,gemini,codex")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro-latest")
 
 def _pusher_auth_signature(message: str) -> str:
     """Return hex HMAC-SHA256 signature for auth payload."""
@@ -235,7 +240,7 @@ class ConnectionManager:
         logger.debug(f"Broadcasted message. Remaining active connections: {len(self.active_connections)}")
 
     async def start_pubsub_listener(self, redis_client):
-        """Starts a background task to listen to Redis Pub/Sub."""
+        """Starts a background task to listen to Redis Pub/Sub and mirror to Soketi."""
         self.redis_client = redis_client
         pubsub = self.redis_client.pubsub()
         await pubsub.subscribe("forgeiq_task_updates")
@@ -331,6 +336,28 @@ async def api_status(db: Session = Depends(get_db)):
         logger.error(f"ForgeIQ health check failed: {e}")
         raise HTTPException(status_code=500, detail={"status": "unhealthy", "details": str(e)})
 
+# === Public config for frontend (LLM defaults + Soketi public info) ===
+@app.get("/config", tags=["System"])
+def public_config():
+    """
+    Returns non-sensitive runtime configuration that the frontend can safely read.
+    """
+    return {
+        "llm": {
+            "provider_priority": LLM_PROVIDER_PRIORITY,
+            "openai_model": OPENAI_MODEL,
+            "gemini_model": GEMINI_MODEL,
+        },
+        "realtime": {
+            "wsHost": SOKETI_HOST,
+            "wsPort": SOKETI_PORT,
+            "forceTLS": SOKETI_TLS,
+            "cluster": PUSHER_CLUSTER,
+            "appId": SOKETI_APP_ID,
+            "publicKey": SOKETI_KEY,     # This is the client key; safe to expose
+        }
+    }
+
 # === Pusher/Soketi private & presence auth ===
 @app.post("/api/broadcasting/auth")
 async def pusher_auth(request: Request):
@@ -380,7 +407,7 @@ async def pusher_auth(request: Request):
         resp["channel_data"] = channel_data
     return JSONResponse(resp)
 
-# --- Primary Build Endpoint (Called by Autosoft Orchestrator) ---
+# --- Primary Build Endpoint (Called by Orchestrator) ---
 @app.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPayloadFromOrchestrator, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
@@ -399,6 +426,7 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
         db.commit()
         db.refresh(new_forgeiq_task)
 
+        # NOTE: body is forwarded to the Celery task; it may include providers[] / llm_provider
         run_forgeiq_pipeline_task.delay(task_payload_from_orchestrator.dict(), forgeiq_task_id)
 
         logger.info(f"ForgeIQ build request received. Internal Task ID: {forgeiq_task_id}. Task created in DB and dispatched.")
@@ -411,10 +439,14 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
     except Exception as e:
         db.rollback()
         logger.exception(f"ForgeIQ: Error initiating build task for {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate ForgeIQ build task: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initiate build task: {e}")
 
 @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
+    """
+    Handles general AI requests asynchronously.
+    Accepts context_data.config_options.{ providers: [..], llm_provider: "..." } for LLM routing.
+    """
     if not request_data.prompt or len(request_data.prompt.strip()) == 0:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
@@ -455,7 +487,7 @@ async def handle_gateway_request(request_data: UserPromptData, db: Session = Dep
         logger.exception(f"ForgeIQ Gateway: Error initiating LLM task for prompt: '{request_data.prompt}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate LLM task: {e}")
 
-# --- Generic WebSocket Endpoint ---
+# --- Generic WebSocket Endpoint (native WS; Soketi remains primary) ---
 @app.websocket("/ws/tasks/updates")
 async def websocket_task_updates(websocket: WebSocket):
     try:
@@ -583,8 +615,8 @@ async def overall_summary(db: Session = Depends(get_db)):
         for status_val, c in rows:
             st = (status_val or "").lower()
             cnt = int(c or 0)
-            if "fail" in st: failed += cnt
-            elif any(x in st for x in ["pending", "running", "progress"]): running += cnt
+            if "fail" in st or "error" in st: failed += cnt
+            elif any(x in st for x in ["pending", "running", "progress", "processing"]): running += cnt
             elif any(x in st for x in ["complete", "success"]): completed += cnt
     except Exception:
         pass
@@ -696,11 +728,14 @@ async def deployments_recent_summary(limit: int = Query(3, ge=1, le=12), db: Ses
         })
     return items
 
-# --- Live pipeline run (replaces demo) ---
+# --- Live pipeline run (real; replaces demo) ---
 @app.post("/pipelines/run", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def run_pipeline_live(request: PipelineGenerateRequest, db: Session = Depends(get_db)):
     """
     Kicks off the real ForgeIQ pipeline using your Celery task.
+
+    NOTE: The request body is passed straight through to the worker and may include
+    `providers: [..]` (preferred) and/or `llm_provider: "..."` to control LLM routing.
     """
     forgeiq_task_id = str(uuid.uuid4())
 
@@ -711,14 +746,14 @@ async def run_pipeline_live(request: PipelineGenerateRequest, db: Session = Depe
             status="pending",
             progress=0,
             current_stage="Queued",
-            payload=request.dict(),
+            payload=request.dict(),     # preserves providers[] / llm_provider if supplied
             logs="Pipeline run requested and queued."
         )
         db.add(new_task)
         db.commit()
         db.refresh(new_task)
 
-        # Dispatch Celery task; worker should publish progress to Redis "forgeiq_task_updates"
+        # Dispatch Celery task; worker publishes progress to Redis "forgeiq_task_updates"
         run_forgeiq_pipeline_task.delay(request.dict(), forgeiq_task_id)
 
         logger.info(f"Pipeline run request accepted. Task ID: {forgeiq_task_id}")
