@@ -6,7 +6,7 @@ import logging
 import asyncio
 import subprocess
 from contextlib import asynccontextmanager
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 
 from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect, APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 import httpx
 import stripe
+import hmac, hashlib
 
 # === Configure Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -56,7 +57,7 @@ from .api_models import TaskPayloadFromOrchestrator
 from .api_models import SDKMCPStrategyRequestContext
 from .api_models import SDKMCPStrategyResponse
 from .api_models import ApplyAlgorithmResponse
-from .api_models import DemoRequestPayload  # <-- This import is crucial for the demo endpoint
+from .api_models import DemoRequestPayload  # kept for compatibility
 
 # === Internal ForgeIQ components ===
 from app.orchestrator import Orchestrator
@@ -112,15 +113,10 @@ ALLOWED_ORIGINS = [
     "https://forgeiq-production.up.railway.app",          # Frontend (prod)
     "http://localhost:3000",
     "http://localhost:5173",
-    # add other real frontends as needed
 ]
-# Optionally allow all Railway preview frontends for this app (uncomment if you actually need it)
-# ALLOW_ORIGIN_REGEX = r"https://forgeiq-.*\.up\.railway\.app"
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    # allow_origin_regex=ALLOW_ORIGIN_REGEX,  # <- use instead of allow_origins if you need previews
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -128,7 +124,67 @@ app.add_middleware(
     max_age=86400,
 )
 
-# === Connection Manager for WebSockets ===
+# === Soketi / Pusher-compatible configuration ===
+SOKETI_APP_ID = os.getenv("SOKETI_APP_ID", "forgeiq")
+SOKETI_KEY = os.getenv("SOKETI_KEY", "local")
+SOKETI_SECRET = os.getenv("SOKETI_SECRET", "secret")
+SOKETI_HOST = os.getenv("SOKETI_HOST", "soketi-forgeiq-production.up.railway.app")
+SOKETI_PORT = int(os.getenv("SOKETI_PORT", "443"))
+SOKETI_TLS = os.getenv("SOKETI_TLS", "true").lower() == "true"
+PUSHER_CLUSTER = os.getenv("PUSHER_CLUSTER", "mt1")  # client-side required field
+
+def _pusher_auth_signature(message: str) -> str:
+    """Return hex HMAC-SHA256 signature for auth payload."""
+    mac = hmac.new(SOKETI_SECRET.encode("utf-8"), msg=message.encode("utf-8"), digestmod=hashlib.sha256)
+    return mac.hexdigest()
+
+def _emit_to_soketi(channel: str, event: str, payload: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """
+    Trigger an event to Soketi using its HTTP API (Pusher REST-compatible).
+    """
+    import time, urllib.parse
+
+    scheme = "https" if SOKETI_TLS else "http"
+    host = f"{scheme}://{SOKETI_HOST}:{SOKETI_PORT}"
+    path = f"/apps/{SOKETI_APP_ID}/events"
+    method = "POST"
+    body = json.dumps({
+        "name": event,
+        "channels": [channel],
+        "data": json.dumps(payload),
+    })
+
+    auth_timestamp = str(int(time.time()))
+    auth_version = "1.0"
+    query_params = {
+        "auth_key": SOKETI_KEY,
+        "auth_timestamp": auth_timestamp,
+        "auth_version": auth_version,
+        "body_md5": hashlib.md5(body.encode("utf-8")).hexdigest(),
+    }
+    query_str = "&".join(f"{k}={urllib.parse.quote(v)}" for k, v in sorted(query_params.items()))
+    string_to_sign = "\n".join([method, path, query_str])
+    auth_signature = _pusher_auth_signature(string_to_sign)
+    url = f"{host}{path}?{query_str}&auth_signature={auth_signature}"
+
+    try:
+        resp = httpx.post(url, content=body, headers={"Content-Type": "application/json"}, timeout=5.0)
+        if 200 <= resp.status_code < 300:
+            return True, None
+        return False, f"{resp.status_code}: {resp.text}"
+    except Exception as e:
+        return False, str(e)
+
+def emit_task_update(payload: Dict[str, Any]) -> None:
+    """
+    Generic emitter used from Redis pub/sub listener to forward updates to Soketi.
+    """
+    event = payload.get("event") or "TaskUpdated"
+    ok, err = _emit_to_soketi("private-forgeiq", event, payload)
+    if not ok:
+        logger.warning(f"Soketi emit failed: {err}")
+
+# === Connection Manager for WebSockets (native WS kept for compatibility) ===
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
@@ -191,7 +247,13 @@ class ConnectionManager:
                 if message and message["type"] == "message":
                     data = json.loads(message["data"])
                     logger.debug(f"Received Pub/Sub message: {data}")
+                    # Native WS broadcast
                     await self.broadcast(data)
+                    # Forward to Soketi (Pusher) as well
+                    try:
+                        emit_task_update(data)
+                    except Exception as e:
+                        logger.warning(f"Failed to emit to Soketi: {e}")
                 await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 logger.info("Pub/Sub listener task cancelled.")
@@ -202,34 +264,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()  # Global instance
 
-# --- Public demo endpoint ---
-@app.post("/demo/pipeline", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-async def start_demo_pipeline(payload: DemoRequestPayload, db: Session = Depends(get_db)):
-    forgeiq_task_id = str(uuid.uuid4())
-
-    new_forgeiq_task = ForgeIQTask(
-        id=forgeiq_task_id,
-        task_type="demo_pipeline",
-        status="pending",
-        progress=0,
-        current_stage="Queued",
-        payload=payload.dict(),
-        logs="Demo pipeline task received and queued."
-    )
-    db.add(new_forgeiq_task)
-    db.commit()
-    db.refresh(new_forgeiq_task)
-
-    run_forgeiq_pipeline_task.delay(payload.dict(), forgeiq_task_id)
-    logger.info(f"Demo pipeline started. Internal Task ID: {forgeiq_task_id}")
-
-    return {
-        "status": "accepted",
-        "message": "Demo pipeline started. Check WebSocket for updates.",
-        "forgeiq_task_id": forgeiq_task_id
-    }
-
-# === Global Async Redis Client instance for ForgeIQ ===
+# === FastAPI events ===
 _global_forgeiq_redis_aio_client = None
 
 @app.on_event("startup")
@@ -296,6 +331,55 @@ async def api_status(db: Session = Depends(get_db)):
         logger.error(f"ForgeIQ health check failed: {e}")
         raise HTTPException(status_code=500, detail={"status": "unhealthy", "details": str(e)})
 
+# === Pusher/Soketi private & presence auth ===
+@app.post("/api/broadcasting/auth")
+async def pusher_auth(request: Request):
+    """
+    Pusher-compatible auth endpoint. Expects socket_id and channel_name.
+    Optional presence: user_id, user_info (JSON).
+    """
+    # Support both form and JSON
+    try:
+        form = await request.form()
+        socket_id = form.get("socket_id")
+        channel_name = form.get("channel_name")
+        user_id = form.get("user_id")
+        user_info_raw = form.get("user_info")
+    except Exception:
+        # Fall back to JSON if not form
+        body = await request.json()
+        socket_id = body.get("socket_id")
+        channel_name = body.get("channel_name")
+        user_id = body.get("user_id")
+        user_info_raw = body.get("user_info")
+
+    if not socket_id or not channel_name:
+        raise HTTPException(status_code=400, detail="socket_id and channel_name are required")
+
+    # Presence channel data
+    channel_data = None
+    if channel_name.startswith("presence-"):
+        if not user_id:
+            user_id = f"anon-{uuid.uuid4().hex[:8]}"
+        try:
+            user_info = json.loads(user_info_raw) if user_info_raw else {}
+        except Exception:
+            user_info = {}
+        channel_data = json.dumps({"user_id": user_id, "user_info": user_info})
+
+    # Build signature
+    if channel_data:
+        string_to_sign = f"{socket_id}:{channel_name}:{channel_data}"
+    else:
+        string_to_sign = f"{socket_id}:{channel_name}"
+
+    signature = _pusher_auth_signature(string_to_sign)
+    auth = f"{SOKETI_KEY}:{signature}"
+    resp = {"auth": auth}
+    if channel_data:
+        resp["channel_data"] = channel_data
+    return JSONResponse(resp)
+
 # --- Primary Build Endpoint (Called by Autosoft Orchestrator) ---
 @app.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPayloadFromOrchestrator, db: Session = Depends(get_db)):
@@ -331,11 +415,6 @@ async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPay
 
 @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
-    """
-    Handles general AI requests from the frontend asynchronously.
-    Dispatches a Celery task and immediately returns a task ID.
-    The frontend should track progress via a central WebSocket listener.
-    """
     if not request_data.prompt or len(request_data.prompt.strip()) == 0:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
@@ -382,8 +461,7 @@ async def websocket_task_updates(websocket: WebSocket):
     try:
         await manager.connect(websocket)
         while True:
-            # keepalive: receive and ignore; or implement ping/pong if desired
-            _ = await websocket.receive_text()
+            _ = await websocket.receive_text()  # keepalive from client
     except WebSocketDisconnect:
         logger.info(f"WebSocket client disconnected from /ws/tasks/updates.")
     except Exception as e:
@@ -487,6 +565,168 @@ async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = D
         output_data=task.output_data if task.output_data else {},
         details=task.details if task.details else {}
     )
+
+# === Dashboard summary endpoints ===
+@app.get("/api/forgeiq/system/overall-summary", tags=["Dashboard"])
+async def overall_summary(db: Session = Depends(get_db)):
+    # Heuristic aggregation from tasks in last 24h
+    failed = 0
+    running = 0
+    completed = 0
+    try:
+        rows = db.execute(text("""
+            SELECT status, COUNT(*) as c
+            FROM forgeiq_tasks
+            WHERE created_at >= NOW() - INTERVAL '24 HOURS'
+            GROUP BY status
+        """)).fetchall()
+        for status_val, c in rows:
+            st = (status_val or "").lower()
+            cnt = int(c or 0)
+            if "fail" in st: failed += cnt
+            elif any(x in st for x in ["pending", "running", "progress"]): running += cnt
+            elif any(x in st for x in ["complete", "success"]): completed += cnt
+    except Exception:
+        pass
+
+    if failed == 0:
+        health = "Operational"
+    elif failed <= 2:
+        health = "Minor Issues"
+    else:
+        health = "Degraded"
+
+    projects_count = 0
+    try:
+        rows = db.execute(text("""
+            SELECT DISTINCT COALESCE((payload->>'project')::text, (details->>'project')::text) as project
+            FROM forgeiq_tasks
+            WHERE created_at >= NOW() - INTERVAL '7 DAYS'
+        """)).fetchall()
+        projects_count = len([1 for r in rows if r and r[0]])
+    except Exception:
+        pass
+
+    return {
+        "active_projects_count": projects_count,
+        "total_agents_defined": 12,               # TODO: replace with real agents registry
+        "agents_online_count": 9,                 # TODO: replace with real heartbeats
+        "critical_alerts_count": failed,
+        "system_health_status": health
+    }
+
+@app.get("/api/forgeiq/projects/summary", tags=["Dashboard"])
+async def projects_summary(limit: int = Query(3, ge=1, le=12), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+        SELECT id, status, created_at, payload
+        FROM forgeiq_tasks
+        WHERE task_type IN ('build_orchestration','pipeline_generation')
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """), {"limit": limit}).mappings().all()
+    resp = []
+    for r in rows:
+        status = str(r["status"] or "").upper() or "N/A"
+        ts = r.get("created_at")
+        payload = r.get("payload") or {}
+        if isinstance(payload, str):
+            try: payload = json.loads(payload)
+            except Exception: payload = {}
+        name = payload.get("project") or payload.get("project_id") or f"Task {r['id'][:8]}"
+        resp.append({
+            "name": name,
+            "last_build_status": status,
+            "last_build_timestamp": (ts.isoformat() + "Z") if hasattr(ts, "isoformat") else datetime.datetime.utcnow().isoformat() + "Z",
+            "repo_url": payload.get("repo_url"),
+        })
+    return resp
+
+@app.get("/api/forgeiq/pipelines/recent-summary", tags=["Dashboard"])
+async def pipelines_recent_summary(limit: int = Query(3, ge=1, le=12), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+        SELECT id, status, created_at, payload
+        FROM forgeiq_tasks
+        WHERE task_type IN ('build_orchestration','pipeline_generation')
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """), {"limit": limit}).mappings().all()
+    items = []
+    for r in rows:
+        ts = r.get("created_at")
+        payload = r.get("payload") or {}
+        if isinstance(payload, str):
+            try: payload = json.loads(payload)
+            except Exception: payload = {}
+        items.append({
+            "dag_id": f"dag_{r['id'][:8]}",
+            "project_id": payload.get("project") or payload.get("project_id") or "unknown",
+            "status": str(r["status"] or "").upper() or "RUNNING",
+            "started_at": (ts.isoformat() + "Z") if hasattr(ts, "isoformat") else datetime.datetime.utcnow().isoformat() + "Z",
+            "trigger": payload.get("trigger") or "Scheduled"
+        })
+    return items
+
+@app.get("/api/forgeiq/deployments/recent-summary", tags=["Dashboard"])
+async def deployments_recent_summary(limit: int = Query(3, ge=1, le=12), db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+        SELECT id, status, created_at, payload, details
+        FROM forgeiq_tasks
+        WHERE task_type = 'deployment_trigger'
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """), {"limit": limit}).mappings().all()
+    items = []
+    for r in rows:
+        ts = r.get("created_at")
+        p = r.get("payload") or {}
+        d = r.get("details") or {}
+        if isinstance(p, str):
+            try: p = json.loads(p)
+            except Exception: p = {}
+        if isinstance(d, str):
+            try: d = json.loads(d)
+            except Exception: d = {}
+        items.append({
+            "deployment_id": f"depl_{r['id'][:8]}",
+            "service_name": p.get("service_name") or d.get("service") or "unknown",
+            "target_environment": p.get("environment") or d.get("env") or "staging",
+            "commit_sha": (p.get("commit_sha") or d.get("commit") or "")[:7],
+            "status": str(r["status"] or "").upper() or "IN_PROGRESS",
+            "completed_at": (ts.isoformat() + "Z") if hasattr(ts, "isoformat") else datetime.datetime.utcnow().isoformat() + "Z",
+        })
+    return items
+
+# --- Live pipeline run (replaces demo) ---
+@app.post("/pipelines/run", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
+async def run_pipeline_live(request: PipelineGenerateRequest, db: Session = Depends(get_db)):
+    """
+    Kicks off the real ForgeIQ pipeline using your Celery task.
+    """
+    forgeiq_task_id = str(uuid.uuid4())
+
+    try:
+        new_task = ForgeIQTask(
+            id=forgeiq_task_id,
+            task_type="pipeline_generation",
+            status="pending",
+            progress=0,
+            current_stage="Queued",
+            payload=request.dict(),
+            logs="Pipeline run requested and queued."
+        )
+        db.add(new_task)
+        db.commit()
+        db.refresh(new_task)
+
+        # Dispatch Celery task; worker should publish progress to Redis "forgeiq_task_updates"
+        run_forgeiq_pipeline_task.delay(request.dict(), forgeiq_task_id)
+
+        logger.info(f"Pipeline run request accepted. Task ID: {forgeiq_task_id}")
+        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Error initiating live pipeline: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initiate pipeline: {e}")
 
 # === Billing (Stripe) ===
 billing_router = APIRouter(tags=["Billing"])
