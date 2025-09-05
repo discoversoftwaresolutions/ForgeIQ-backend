@@ -8,9 +8,13 @@ import subprocess
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List, Set, Tuple
 
-from fastapi import FastAPI, HTTPException, Body, Query, Depends, Security, status, WebSocket, WebSocketDisconnect, APIRouter, Request
+from fastapi import (
+    FastAPI, HTTPException, Body, Query, Depends, Security, status,
+    WebSocket, WebSocketDisconnect, APIRouter, Request, UploadFile, File
+)
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from sqlalchemy.orm import Session
@@ -19,6 +23,7 @@ from sqlalchemy import text
 import httpx
 import stripe
 import hmac, hashlib
+import pathlib
 
 # === Configure Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -268,6 +273,31 @@ class ConnectionManager:
                 await asyncio.sleep(1.0)
 
 manager = ConnectionManager()  # Global instance
+
+# === Optional S3 for uploads/SDK artifacts ===
+USE_S3 = os.getenv("FORGEIQ_UPLOADS_S3", "false").lower() == "true"
+S3_BUCKET = os.getenv("FORGEIQ_S3_BUCKET", "")
+S3_REGION = os.getenv("FORGEIQ_S3_REGION", "us-east-1")
+S3_PREFIX = os.getenv("FORGEIQ_S3_PREFIX", "uploads/")
+if USE_S3:
+    import boto3
+    s3_client = boto3.client("s3", region_name=S3_REGION)
+
+# Local directories (used when USE_S3 = false)
+UPLOAD_DIR = pathlib.Path(os.getenv("FORGEIQ_UPLOAD_DIR", "./uploads")).resolve()
+SDK_DIR    = pathlib.Path(os.getenv("FORGEIQ_SDK_DIR", "./sdk")).resolve()
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+SDK_DIR.mkdir(parents=True, exist_ok=True)
+
+# Serve local dirs as static (harmless if unused)
+try:
+    app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+except Exception:
+    pass
+try:
+    app.mount("/sdk", StaticFiles(directory=str(SDK_DIR)), name="sdk")
+except Exception:
+    pass
 
 # === FastAPI events ===
 _global_forgeiq_redis_aio_client = None
@@ -763,6 +793,149 @@ async def run_pipeline_live(request: PipelineGenerateRequest, db: Session = Depe
         logger.exception(f"Error initiating live pipeline: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate pipeline: {e}")
 
+# === Files Router (Uploads/List) ===
+files_router = APIRouter(prefix="/files", tags=["Files"])
+
+@files_router.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Multipart upload. Field: 'file'
+    Returns { id, name, size, uploaded_at, url }
+    """
+    fid = uuid.uuid4().hex[:12]
+    ts = datetime.datetime.utcnow().isoformat() + "Z"
+
+    if USE_S3:
+        key = f"{S3_PREFIX}{fid}-{file.filename}"
+        try:
+            s3_client.upload_fileobj(file.file, S3_BUCKET, key, ExtraArgs={"ACL": "private"})
+            # presign for download; client can refresh link by calling /files/list again
+            url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": S3_BUCKET, "Key": key},
+                ExpiresIn=3600
+            )
+            head = s3_client.head_object(Bucket=S3_BUCKET, Key=key)
+            size = int(head.get("ContentLength", 0))
+            return {"id": fid, "name": file.filename, "size": size, "uploaded_at": ts, "url": url}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"S3 upload failed: {e}")
+
+    # Local disk
+    target = UPLOAD_DIR / f"{fid}-{file.filename}"
+    try:
+        with target.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        size = target.stat().st_size
+        return {
+            "id": fid, "name": file.filename, "size": size,
+            "uploaded_at": ts, "url": f"/uploads/{target.name}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+@files_router.get("/list")
+async def list_files():
+    """
+    Lists uploaded files. In S3 mode returns presigned URLs.
+    """
+    entries = []
+    if USE_S3:
+        try:
+            paginator = s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    name = key.split("/")[-1]
+                    if not name:
+                        continue
+                    fid = name.split("-")[0] if "-" in name else uuid.uuid4().hex[:12]
+                    url = s3_client.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": S3_BUCKET, "Key": key},
+                        ExpiresIn=1800
+                    )
+                    entries.append({
+                        "id": fid,
+                        "name": name,
+                        "size": int(obj.get("Size", 0)),
+                        "uploaded_at": obj.get("LastModified").isoformat() + "Z" if obj.get("LastModified") else datetime.datetime.utcnow().isoformat() + "Z",
+                        "url": url
+                    })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"S3 list failed: {e}")
+    else:
+        for p in sorted(UPLOAD_DIR.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                name = p.name
+                fid = name.split("-")[0] if "-" in name else uuid.uuid4().hex[:12]
+                entries.append({
+                    "id": fid,
+                    "name": "-".join(name.split("-")[1:]) or name,
+                    "size": p.stat().st_size,
+                    "uploaded_at": datetime.datetime.utcfromtimestamp(p.stat().st_mtime).isoformat() + "Z",
+                    "url": f"/uploads/{name}"
+                })
+            except Exception:
+                continue
+    return entries
+
+# === SDK Router (Releases List) ===
+sdk_router = APIRouter(prefix="/sdk", tags=["SDK"])
+
+@sdk_router.get("/releases")
+async def sdk_releases():
+    """
+    Returns [{ name, version, url, created_at, notes? }]
+    Local mode reads files under SDK_DIR (*.tgz|*.zip).
+    S3 mode lists under <S3_PREFIX>sdk/.
+    """
+    items = []
+    if USE_S3:
+        try:
+            paginator = s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=f"{S3_PREFIX}sdk/"):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if not key.endswith((".tgz", ".zip")):
+                        continue
+                    name = key.split("/")[-1]
+                    base, _, verpart = name.rpartition("-")
+                    version = verpart.replace(".tgz", "").replace(".zip", "") if base else "latest"
+                    url = s3_client.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": S3_BUCKET, "Key": key},
+                        ExpiresIn=1800
+                    )
+                    items.append({
+                        "name": base or name,
+                        "version": version,
+                        "url": url,
+                        "created_at": obj.get("LastModified").isoformat() + "Z" if obj.get("LastModified") else datetime.datetime.utcnow().isoformat() + "Z",
+                        "notes": None
+                    })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"S3 sdk list failed: {e}")
+    else:
+        for p in sorted(SDK_DIR.glob("*.*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.suffix not in (".tgz", ".zip"):
+                continue
+            name = p.name
+            base, _, verpart = name.rpartition("-")
+            version = verpart.replace(".tgz", "").replace(".zip", "") if base else "latest"
+            items.append({
+                "name": base or name,
+                "version": version,
+                "url": f"/sdk/{name}",
+                "created_at": datetime.datetime.utcfromtimestamp(p.stat().st_mtime).isoformat() + "Z",
+                "notes": None
+            })
+    return items
+
 # === Billing (Stripe) ===
 billing_router = APIRouter(tags=["Billing"])
 
@@ -821,7 +994,9 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# Include the billing router
+# === Include routers ===
+app.include_router(files_router)
+app.include_router(sdk_router)
 app.include_router(billing_router)
 
 # === Run Server for Local Dev ===
