@@ -64,6 +64,7 @@ from .api_models import SDKMCPStrategyResponse
 from .api_models import ApplyAlgorithmResponse
 from .api_models import DemoRequestPayload  # kept for compatibility
 from app.api_models import MCPOptimizeRequest, MCPOptimizeResponse
+from app.utils.mcp_helper import optimize_dag_with_mcp
 
 # === Internal ForgeIQ components ===
 from app.orchestrator import Orchestrator
@@ -438,84 +439,64 @@ async def pusher_auth(request: Request):
         resp["channel_data"] = channel_data
     return JSONResponse(resp)
 
-# --- Enhanced /build endpoint with MCP integration ---
-@app.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-async def trigger_forgeiq_build_pipeline(task_payload_from_orchestrator: TaskPayloadFromOrchestrator, db: Session = Depends(get_db)):
+@router.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
+async def trigger_forgeiq_build_pipeline(
+    task_payload_from_orchestrator: TaskPayloadFromOrchestrator, 
+    db: Session = Depends(get_db)
+):
     forgeiq_task_id = str(uuid.uuid4())
     mcp_strategy_applied = None
 
-    try:
-        # --- Create initial ForgeIQ task record ---
-        new_forgeiq_task = ForgeIQTask(
-            id=forgeiq_task_id,
-            task_type="build_orchestration",
-            status="pending",
-            progress=0,
-            current_stage="Queued",
-            payload=task_payload_from_orchestrator.dict(),
-            logs="ForgeIQ build task received and queued."
-        )
-        db.add(new_forgeiq_task)
-        db.commit()
-        db.refresh(new_forgeiq_task)
+    # Create initial ForgeIQ task record
+    new_forgeiq_task = ForgeIQTask(
+        id=forgeiq_task_id,
+        task_type="build_orchestration",
+        status="pending",
+        progress=0,
+        current_stage="Queued",
+        payload=task_payload_from_orchestrator.dict(),
+        logs="ForgeIQ build task received and queued."
+    )
+    db.add(new_forgeiq_task)
+    db.commit()
+    db.refresh(new_forgeiq_task)
 
-        # --- Call MCP optimizer if mission/dag provided ---
-        mission_data = task_payload_from_orchestrator.dict().get("mission", {})
-        dag_data = task_payload_from_orchestrator.dict().get("dag", {})
+    # --- Optimize DAG via MCP helper ---
+    mission_data = task_payload_from_orchestrator.dict().get("mission", {})
+    dag_data = task_payload_from_orchestrator.dict().get("dag", {})
 
-        if mission_data and dag_data:
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    mcp_url = os.getenv("MCP_URL", "http://localhost:8001/mcp/optimize")
-                    mcp_payload = MCPOptimizeRequest(
-                        mission=mission_data,
-                        dag=dag_data,
-                        goal="general_build_efficiency"
-                    ).dict()
-                    resp = await client.post(mcp_url, json=mcp_payload)
-                    resp.raise_for_status()
-                    optimized = MCPOptimizeResponse(**resp.json())
-                    mcp_strategy_applied = optimized.strategy_id
-
-                    # Replace DAG in the task payload with optimized DAG
-                    task_payload_from_orchestrator.dag = optimized.optimized_dag
-                    new_forgeiq_task.payload["dag"] = optimized.optimized_dag
-                    new_forgeiq_task.details = {
-                        "mcp_strategy_id": optimized.strategy_id,
-                        "policies_applied": optimized.policies_applied,
-                        "explanation": optimized.explanation
-                    }
-                    db.commit()
-                    logger.info(f"MCP optimization applied. Strategy ID: {optimized.strategy_id}")
-            except Exception as e:
-                logger.warning(f"MCP optimization failed, continuing with original DAG: {e}")
-
-        # --- Dispatch Celery build pipeline task ---
-        run_forgeiq_pipeline_task.delay(task_payload_from_orchestrator.dict(), forgeiq_task_id)
-        logger.info(f"ForgeIQ build request received. Internal Task ID: {forgeiq_task_id}. Task dispatched to Celery.")
-
-        # --- Emit initial task update to WebSocket/Soketi ---
-        emit_task_update({
-            "event": "TaskUpdated",
-            "task_id": forgeiq_task_id,
-            "status": "pending",
-            "current_stage": "Queued",
-            "logs": "Task queued and MCP strategy applied." if mcp_strategy_applied else "Task queued."
-        })
-
-        return {
-            "status": "accepted",
-            "message": "ForgeIQ pipeline started in background.",
-            "forgeiq_task_id": forgeiq_task_id,
-            "mcp_strategy_applied": mcp_strategy_applied
+    optimized = await optimize_dag_with_mcp(mission_data, dag_data)
+    if optimized:
+        task_payload_from_orchestrator.dag = optimized.optimized_dag
+        new_forgeiq_task.payload["dag"] = optimized.optimized_dag
+        new_forgeiq_task.details = {
+            "mcp_strategy_id": optimized.strategy_id,
+            "policies_applied": optimized.policies_applied,
+            "explanation": optimized.explanation
         }
+        mcp_strategy_applied = optimized.strategy_id
+        db.commit()
 
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"ForgeIQ: Error initiating build task for {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate build task: {e}")
+    # Dispatch Celery build pipeline
+    run_forgeiq_pipeline_task.delay(task_payload_from_orchestrator.dict(), forgeiq_task_id)
 
-@app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
+    # Emit WebSocket/Soketi update
+    emit_task_update({
+        "event": "TaskUpdated",
+        "task_id": forgeiq_task_id,
+        "status": "pending",
+        "current_stage": "Queued",
+        "logs": "Task queued and MCP strategy applied." if mcp_strategy_applied else "Task queued."
+    })
+
+    return {
+        "status": "accepted",
+        "message": "ForgeIQ pipeline started in background.",
+        "forgeiq_task_id": forgeiq_task_id,
+        "mcp_strategy_applied": mcp_strategy_applied
+    }
+    
+    @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
     """
     Handles general AI requests asynchronously.
