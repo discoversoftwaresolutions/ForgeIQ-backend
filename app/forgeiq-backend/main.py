@@ -65,6 +65,7 @@ from .api_models import ApplyAlgorithmResponse
 from .api_models import DemoRequestPayload  # kept for compatibility
 from app.api_models import MCPOptimizeRequest, MCPOptimizeResponse
 from app.utils.mcp_helper import optimize_dag_with_mcp
+from app.utils.mcp_wrapper import apply_mcp_to_payload
 
 # === Internal ForgeIQ components ===
 from app.orchestrator import Orchestrator
@@ -586,8 +587,10 @@ async def generate_code_endpoint(request: CodeGenerationRequest, db: Session = D
 @app.post("/pipeline_generate", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def generate_pipeline_endpoint(request: PipelineGenerateRequest, db: Session = Depends(get_db)):
     forgeiq_task_id = str(uuid.uuid4())
+    mcp_strategy_applied = None
 
     try:
+        # Create initial ForgeIQ task record
         new_forgeiq_task = ForgeIQTask(
             id=forgeiq_task_id,
             task_type="pipeline_generation",
@@ -601,46 +604,98 @@ async def generate_pipeline_endpoint(request: PipelineGenerateRequest, db: Sessi
         db.commit()
         db.refresh(new_forgeiq_task)
 
+        # --- Apply MCP optimization ---
+        mcp_strategy_applied = await apply_mcp_to_payload(request, db)
+
+        # Dispatch Celery task
         run_pipeline_generation_task.delay(request.dict(), forgeiq_task_id)
-        logger.info(f"Pipeline generation request received. Task ID: {forgeiq_task_id}.")
-        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
+        logger.info(f"Pipeline generation request received. Task ID: {forgeiq_task_id}. MCP applied: {mcp_strategy_applied}")
+
+        # Emit WebSocket/Soketi update
+        emit_task_update({
+            "event": "TaskUpdated",
+            "task_id": forgeiq_task_id,
+            "status": "pending",
+            "current_stage": "Queued",
+            "logs": "Task queued and MCP strategy applied." if mcp_strategy_applied else "Task queued."
+        })
+
+        return {
+            "status": "accepted",
+            "forgeiq_task_id": forgeiq_task_id,
+            "mcp_strategy_applied": mcp_strategy_applied
+        }
+
     except Exception as e:
         db.rollback()
         logger.exception(f"ForgeIQ: Error initiating pipeline generation task {forgeiq_task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate pipeline generation task: {e}")
-
 @app.post("/deploy_service", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def deploy_service_endpoint(request: DeploymentTriggerRequest, db: Session = Depends(get_db)):
+    """
+    Triggers a deployment task for a service. Tracks MCP strategy if available.
+    """
     forgeiq_task_id = str(uuid.uuid4())
+    mcp_strategy_applied = None
 
     try:
+        payload_dict = request.dict()
+        # Attempt to capture MCP strategy from payload if it exists
+        mcp_strategy_applied = payload_dict.get("dag", {}).get("mcp_strategy_id") or payload_dict.get("mcp_strategy_id")
+
         new_forgeiq_task = ForgeIQTask(
             id=forgeiq_task_id,
             task_type="deployment_trigger",
             status="pending",
             progress=0,
             current_stage="Queued",
-            payload=request.dict(),
+            payload=payload_dict,
+            details={"mcp_strategy_id": mcp_strategy_applied} if mcp_strategy_applied else {},
             logs="Deployment trigger task received and queued."
         )
         db.add(new_forgeiq_task)
         db.commit()
         db.refresh(new_forgeiq_task)
 
-        run_deployment_trigger_task.delay(request.dict(), forgeiq_task_id)
-        logger.info(f"Deployment request received. Task ID: {forgeiq_task_id}.")
-        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
+        # Dispatch Celery deployment task
+        run_deployment_trigger_task.delay(payload_dict, forgeiq_task_id)
+
+        logger.info(f"Deployment request received. Task ID: {forgeiq_task_id}, MCP strategy: {mcp_strategy_applied}")
+        return {
+            "status": "accepted",
+            "forgeiq_task_id": forgeiq_task_id,
+            "mcp_strategy_applied": mcp_strategy_applied
+        }
+
     except Exception as e:
         db.rollback()
         logger.exception(f"ForgeIQ: Error initiating deployment task {forgeiq_task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate deployment task: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to initiate deployment task: {e}"
+        )
 
 # --- Internal ForgeIQ Task Status REST Endpoint (for polling if WS fails) ---
 @app.get("/forgeiq/status/{forgeiq_task_id}", response_model=ForgeIQTaskStatusResponse)
 async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = Depends(get_db)):
+    """
+    Returns the current status of a ForgeIQ task.
+    Includes MCP strategy info if applied.
+    """
     task = db.query(ForgeIQTask).filter(ForgeIQTask.id == forgeiq_task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="ForgeIQ Task not found")
+
+    # Ensure MCP strategy is included in details for visibility
+    details = task.details or {}
+    payload = task.payload or {}
+
+    # Try to populate mcp_strategy_id from payload if not already present
+    if "mcp_strategy_id" not in details:
+        if isinstance(payload, dict):
+            mcp_strategy = payload.get("dag", {}).get("mcp_strategy_id") or payload.get("mcp_strategy_id")
+            if mcp_strategy:
+                details["mcp_strategy_id"] = mcp_strategy
 
     return ForgeIQTaskStatusResponse(
         task_id=task.id,
@@ -648,18 +703,18 @@ async def get_forgeiq_task_status_endpoint(forgeiq_task_id: str, db: Session = D
         status=task.status,
         current_stage=task.current_stage,
         progress=task.progress,
-        logs=task.logs if task.logs else "",
-        output_data=task.output_data if task.output_data else {},
-        details=task.details if task.details else {}
+        logs=task.logs or "",
+        output_data=task.output_data or {},
+        details=details
     )
 
-# === Dashboard summary endpoints ===
 @app.get("/api/forgeiq/system/overall-summary", tags=["Dashboard"])
 async def overall_summary(db: Session = Depends(get_db)):
-    # Heuristic aggregation from tasks in last 24h
-    failed = 0
-    running = 0
-    completed = 0
+    """
+    Aggregates system-wide metrics over recent tasks.
+    Provides overall health, active projects count, and alerts.
+    """
+    failed = running = completed = 0
     try:
         rows = db.execute(text("""
             SELECT status, COUNT(*) as c
@@ -670,9 +725,12 @@ async def overall_summary(db: Session = Depends(get_db)):
         for status_val, c in rows:
             st = (status_val or "").lower()
             cnt = int(c or 0)
-            if "fail" in st or "error" in st: failed += cnt
-            elif any(x in st for x in ["pending", "running", "progress", "processing"]): running += cnt
-            elif any(x in st for x in ["complete", "success"]): completed += cnt
+            if "fail" in st or "error" in st:
+                failed += cnt
+            elif any(x in st for x in ["pending", "running", "progress", "processing"]):
+                running += cnt
+            elif any(x in st for x in ["complete", "success"]):
+                completed += cnt
     except Exception:
         pass
 
@@ -686,7 +744,10 @@ async def overall_summary(db: Session = Depends(get_db)):
     projects_count = 0
     try:
         rows = db.execute(text("""
-            SELECT DISTINCT COALESCE((payload->>'project')::text, (details->>'project')::text) as project
+            SELECT DISTINCT COALESCE(
+                (payload->>'project')::text,
+                (details->>'project')::text
+            ) as project
             FROM forgeiq_tasks
             WHERE created_at >= NOW() - INTERVAL '7 DAYS'
         """)).fetchall()
@@ -696,65 +757,106 @@ async def overall_summary(db: Session = Depends(get_db)):
 
     return {
         "active_projects_count": projects_count,
-        "total_agents_defined": 12,               # TODO: replace with real agents registry
-        "agents_online_count": 9,                 # TODO: replace with real heartbeats
+        "total_agents_defined": 12,  # TODO: replace with real agents registry
+        "agents_online_count": 9,     # TODO: replace with real heartbeats
         "critical_alerts_count": failed,
         "system_health_status": health
     }
 
+
 @app.get("/api/forgeiq/projects/summary", tags=["Dashboard"])
 async def projects_summary(limit: int = Query(3, ge=1, le=12), db: Session = Depends(get_db)):
+    """
+    Returns summary of most recent project tasks.
+    """
     rows = db.execute(text("""
-        SELECT id, status, created_at, payload
+        SELECT id, status, created_at, payload, details
         FROM forgeiq_tasks
         WHERE task_type IN ('build_orchestration','pipeline_generation')
         ORDER BY created_at DESC
         LIMIT :limit
     """), {"limit": limit}).mappings().all()
+
     resp = []
     for r in rows:
-        status = str(r["status"] or "").upper() or "N/A"
+        status = str(r.get("status") or "").upper() or "N/A"
         ts = r.get("created_at")
         payload = r.get("payload") or {}
+        details = r.get("details") or {}
+
         if isinstance(payload, str):
-            try: payload = json.loads(payload)
-            except Exception: payload = {}
-        name = payload.get("project") or payload.get("project_id") or f"Task {r['id'][:8]}"
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except Exception:
+                details = {}
+
+        name = payload.get("project") or payload.get("project_id") or details.get("project") or f"Task {r['id'][:8]}"
+        mcp_strategy = details.get("mcp_strategy_id")
+
         resp.append({
             "name": name,
             "last_build_status": status,
             "last_build_timestamp": (ts.isoformat() + "Z") if hasattr(ts, "isoformat") else datetime.datetime.utcnow().isoformat() + "Z",
             "repo_url": payload.get("repo_url"),
+            "mcp_strategy_applied": mcp_strategy
         })
+
     return resp
+
 
 @app.get("/api/forgeiq/pipelines/recent-summary", tags=["Dashboard"])
 async def pipelines_recent_summary(limit: int = Query(3, ge=1, le=12), db: Session = Depends(get_db)):
+    """
+    Returns the most recent ForgeIQ build_orchestration and pipeline_generation tasks.
+    Includes DAG ID, project ID, status, start time, trigger, and MCP strategy applied.
+    """
     rows = db.execute(text("""
-        SELECT id, status, created_at, payload
+        SELECT id, status, created_at, payload, details
         FROM forgeiq_tasks
         WHERE task_type IN ('build_orchestration','pipeline_generation')
         ORDER BY created_at DESC
         LIMIT :limit
     """), {"limit": limit}).mappings().all()
+
     items = []
     for r in rows:
         ts = r.get("created_at")
         payload = r.get("payload") or {}
+        details = r.get("details") or {}
+
         if isinstance(payload, str):
-            try: payload = json.loads(payload)
-            except Exception: payload = {}
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except Exception:
+                details = {}
+
         items.append({
             "dag_id": f"dag_{r['id'][:8]}",
             "project_id": payload.get("project") or payload.get("project_id") or "unknown",
-            "status": str(r["status"] or "").upper() or "RUNNING",
+            "status": str(r.get("status") or "").upper() or "RUNNING",
             "started_at": (ts.isoformat() + "Z") if hasattr(ts, "isoformat") else datetime.datetime.utcnow().isoformat() + "Z",
-            "trigger": payload.get("trigger") or "Scheduled"
+            "trigger": payload.get("trigger") or "Scheduled",
+            "mcp_strategy_applied": details.get("mcp_strategy_id")
         })
+
     return items
+
 
 @app.get("/api/forgeiq/deployments/recent-summary", tags=["Dashboard"])
 async def deployments_recent_summary(limit: int = Query(3, ge=1, le=12), db: Session = Depends(get_db)):
+    """
+    Returns the most recent deployment tasks.
+    """
     rows = db.execute(text("""
         SELECT id, status, created_at, payload, details
         FROM forgeiq_tasks
@@ -762,27 +864,34 @@ async def deployments_recent_summary(limit: int = Query(3, ge=1, le=12), db: Ses
         ORDER BY created_at DESC
         LIMIT :limit
     """), {"limit": limit}).mappings().all()
+
     items = []
     for r in rows:
         ts = r.get("created_at")
-        p = r.get("payload") or {}
-        d = r.get("details") or {}
-        if isinstance(p, str):
-            try: p = json.loads(p)
-            except Exception: p = {}
-        if isinstance(d, str):
-            try: d = json.loads(d)
-            except Exception: d = {}
+        payload = r.get("payload") or {}
+        details = r.get("details") or {}
+
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except Exception:
+                details = {}
+
         items.append({
             "deployment_id": f"depl_{r['id'][:8]}",
-            "service_name": p.get("service_name") or d.get("service") or "unknown",
-            "target_environment": p.get("environment") or d.get("env") or "staging",
-            "commit_sha": (p.get("commit_sha") or d.get("commit") or "")[:7],
-            "status": str(r["status"] or "").upper() or "IN_PROGRESS",
+            "service_name": payload.get("service_name") or details.get("service") or "unknown",
+            "target_environment": payload.get("environment") or details.get("env") or "staging",
+            "commit_sha": (payload.get("commit_sha") or details.get("commit") or "")[:7],
+            "status": str(r.get("status") or "").upper() or "IN_PROGRESS",
             "completed_at": (ts.isoformat() + "Z") if hasattr(ts, "isoformat") else datetime.datetime.utcnow().isoformat() + "Z",
         })
-    return items
 
+    return items
 # --- Live pipeline run (real; replaces demo) ---
 @app.post("/pipelines/run", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def run_pipeline_live(request: PipelineGenerateRequest, db: Session = Depends(get_db)):
@@ -793,31 +902,51 @@ async def run_pipeline_live(request: PipelineGenerateRequest, db: Session = Depe
     `providers: [..]` (preferred) and/or `llm_provider: "..."` to control LLM routing.
     """
     forgeiq_task_id = str(uuid.uuid4())
+    mcp_strategy_applied = None
 
     try:
+        # Create initial ForgeIQ task record
         new_task = ForgeIQTask(
             id=forgeiq_task_id,
             task_type="pipeline_generation",
             status="pending",
             progress=0,
             current_stage="Queued",
-            payload=request.dict(),     # preserves providers[] / llm_provider if supplied
+            payload=request.dict(),  # preserves providers[] / llm_provider if supplied
             logs="Pipeline run requested and queued."
         )
         db.add(new_task)
         db.commit()
         db.refresh(new_task)
 
+        # --- Apply MCP optimization ---
+        mcp_strategy_applied = await apply_mcp_to_payload(request, db)
+
         # Dispatch Celery task; worker publishes progress to Redis "forgeiq_task_updates"
         run_forgeiq_pipeline_task.delay(request.dict(), forgeiq_task_id)
 
-        logger.info(f"Pipeline run request accepted. Task ID: {forgeiq_task_id}")
-        return {"status": "accepted", "forgeiq_task_id": forgeiq_task_id}
+        logger.info(f"Pipeline run request accepted. Task ID: {forgeiq_task_id}. MCP applied: {mcp_strategy_applied}")
+
+        # Emit WebSocket/Soketi update
+        emit_task_update({
+            "event": "TaskUpdated",
+            "task_id": forgeiq_task_id,
+            "status": "pending",
+            "current_stage": "Queued",
+            "logs": "Task queued and MCP strategy applied." if mcp_strategy_applied else "Task queued."
+        })
+
+        return {
+            "status": "accepted",
+            "forgeiq_task_id": forgeiq_task_id,
+            "mcp_strategy_applied": mcp_strategy_applied
+        }
+
     except Exception as e:
         db.rollback()
         logger.exception(f"Error initiating live pipeline: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate pipeline: {e}")
-
+        
 # === Files Router (Uploads/List) ===
 files_router = APIRouter(prefix="/files", tags=["Files"])
 
