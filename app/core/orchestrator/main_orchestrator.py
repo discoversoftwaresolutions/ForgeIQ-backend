@@ -1,167 +1,233 @@
 # ==============================================
-# 📁 core/orchestrator/main_orchestrator.py (V0.3)
+# 📁 core/orchestrator/main_orchestrator.py (V0.5 – Unified Control Plane)
 # ==============================================
+import os
+import json
+import asyncio
+import logging
+import uuid
+import datetime
+from typing import Dict, Any, Optional, List
 
-# [Existing content preserved above. Only additional methods added below.]
+import httpx
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 
-    async def request_mcp_strategy_optimization(self, 
-                                              project_id: str, 
-                                              current_dag: Optional[DagDefinition] = None
-                                             ) -> Optional[Dict[str, Any]]:
-        if not self.forgeiq_sdk_client:
-            logger.error(f"Orchestrator: SDK client not available to request MCP strategy for '{project_id}'.")
-            return None
+from sdk.models import SDKMCPStrategyRequestContext, SDKMCPStrategyResponse
+from interfaces.types.orchestration import OrchestrationFlowState
+from interfaces.types.events import DagDefinition
+from core.event_bus.redis_bus import EventBus, message_summary
+from core.agent_registry import AgentRegistry
+from core.shared_memory import SharedMemoryStore
+from core.message_router import MessageRouter
 
-        span = self._start_trace_span_if_available("request_mcp_strategy", project_id=project_id)
-        logger.info(f"Orchestrator: Requesting MCP build strategy optimization for project '{project_id}'.")
-        try:
-            with span:  # type: ignore
-                dag_info_payload = current_dag if current_dag else None
 
-                sdk_context_for_mcp = {
-                    "project_id": project_id,
-                    "dag_representation": current_dag.get("nodes") if current_dag else None,
-                    "telemetry_data": {"source": "Orchestrator_MCP_Request"}
-                }
+# --- MCP Internal Components ---
+from agents.MCP.strategy import MCPStrategyEngine
+from agents.MCP.memory import get_mcp_memory
+from agents.MCP.metrics import get_mcp_metrics
+from agents.MCP.governance_bridge import send_proprietary_audit_event
 
-                mcp_response = await self.forgeiq_sdk_client.request_mcp_build_strategy(
-                    project_id=project_id,
-                    current_dag_info=dag_info_payload
-                )
+# --- Observability ---
+SERVICE_NAME_ORCHESTRATOR = "ForgeIQ.Orchestrator"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-                if mcp_response:
-                    logger.info(f"Orchestrator: Received strategy from MCP for '{project_id}': {message_summary(mcp_response)}")
-                    if _trace_api and span:
-                        span.set_attribute("mcp.response_status", mcp_response.get("status"))
-                        span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
-                    return mcp_response
-                else:
-                    logger.warning(f"Orchestrator: No strategy response from MCP for '{project_id}'.")
-                    if _trace_api and span:
-                        span.set_attribute("mcp.response_received", False)
-                    return None
-        except Exception as e:
-            logger.error(f"Orchestrator: Error requesting MCP strategy for '{project_id}': {e}", exc_info=True)
-            if _trace_api and span:
-                span.record_exception(e)
-                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
-            return None
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
+logger = logging.getLogger(SERVICE_NAME_ORCHESTRATOR)
+
+_tracer = None
+_trace_api = None
+try:
+    from opentelemetry import trace as otel_trace_api
+    from core.observability.tracing import setup_tracing
+    _tracer = setup_tracing(SERVICE_NAME_ORCHESTRATOR)
+    _trace_api = otel_trace_api
+except ImportError:
+    logger.warning("Tracing unavailable")
+
+# --- Retry Policy for MCP / SDK Calls ---
+SDK_RETRY = retry(
+    stop=stop_after_attempt(7),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    retry=(
+        retry_if_exception_type(httpx.RequestError) |
+        retry_if_exception_type(httpx.HTTPStatusError)
+    ),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True
+)
+
+# --- Exceptions ---
+class OrchestrationError(Exception):
+    def __init__(self, message: str, flow_id: Optional[str] = None, stage: Optional[str] = None):
+        super().__init__(message)
+        self.flow_id = flow_id
+        self.stage = stage
+
+    def __str__(self):
+        return f"OrchestrationError(flow={self.flow_id}, stage={self.stage}): {self.args[0]}"
+
+# ==============================================
+# 🔁 ORCHESTRATOR (SINGLE SOURCE OF TRUTH)
+# ==============================================
+class Orchestrator:
+    def __init__(
+        self,
+        agent_registry: AgentRegistry,
+        event_bus: EventBus,
+        shared_memory: SharedMemoryStore,
+        message_router: MessageRouter,
+        forgeiq_sdk_client: Optional[Any] = None,
+    ):
+        logger.info("Initializing ForgeIQ Unified Orchestrator (V0.5)")
+        self.agent_registry = agent_registry
+        self.event_bus = event_bus
+        self.shared_memory = shared_memory
+        self.message_router = message_router
+        self.forgeiq_sdk_client = forgeiq_sdk_client
+
+        if not forgeiq_sdk_client:
+            logger.warning("ForgeIQ SDK client not provided — MCP optimization disabled")
+
+    # ------------------------------
+    # Tracing Helper
+    # ------------------------------
+    def _start_span(self, name: str, **attrs):
+        if _tracer and _trace_api:
+            span = _tracer.start_span(name)
+            for k, v in attrs.items():
+                span.set_attribute(k, v)
+            return span
+        class NoOpSpan:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def set_attribute(self, *a): pass
+            def record_exception(self, *a): pass
+            def set_status(self, *a): pass
+        return NoOpSpan()
+
+    # ------------------------------
+    # Flow State Management
+    # ------------------------------
+    async def _update_flow_state(
+        self,
+        flow_id: str,
+        updates: Dict[str, Any],
+        initial_state_if_new: Optional[OrchestrationFlowState] = None,
+    ):
+        if not self.shared_memory.redis_client:
+            logger.warning("Shared memory unavailable; cannot persist flow state")
+            return
+
+        key = f"orchestration_flow:{flow_id}"
+        state = await self.shared_memory.get_value(key, expected_type=dict)
+
+        if not state and initial_state_if_new:
+            state = initial_state_if_new.copy()  # type: ignore
+        elif state:
+            state = OrchestrationFlowState(**state)  # type: ignore
+        else:
+            raise OrchestrationError("Flow state missing", flow_id)
+
+        state.update(updates)  # type: ignore
+        state["updated_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+        await self.shared_memory.set_value(key, state, expiry_seconds=86400)
+
+    # ==========================================
+    # 🧠 MCP STRATEGY OPTIMIZATION (Unified)
+    # ==========================================
     async def request_and_apply_mcp_optimization(
-        self, 
-        project_id: str, 
+        self,
+        project_id: str,
         current_dag: DagDefinition,
-        flow_id: str
-        ) -> Optional[DagDefinition]:
+        flow_id: str,
+    ) -> Optional[DagDefinition]:
 
         if not self.forgeiq_sdk_client:
-            logger.error(f"Flow {flow_id}: SDK client not available for MCP optimization request for project '{project_id}'.")
-            return None
+            raise OrchestrationError(
+                "ForgeIQ SDK client unavailable",
+                flow_id=flow_id,
+                stage="MCP_INIT",
+            )
 
-        span_attrs = {"project_id": project_id, "flow_id": flow_id, "mcp_task": "optimize_dag"}
-        span = self._start_trace_span_if_available("request_mcp_optimization", **span_attrs)
-        logger.info(f"Flow {flow_id}: Orchestrator requesting MCP build strategy optimization for project '{project_id}'.")
+        span = self._start_span(
+            "mcp.optimize_dag",
+            project_id=project_id,
+            flow_id=flow_id,
+        )
 
-        await self._update_flow_state(flow_id, {"current_stage": f"REQUESTING_MCP_OPTIMIZATION_FOR_DAG_{current_dag['dag_id']}"})
+        await self._update_flow_state(
+            flow_id,
+            {"current_stage": f"REQUESTING_MCP_OPTIMIZATION_{current_dag['dag_id']}"},
+        )
 
         try:
-            with span:  # type: ignore
-                mcp_request_context = SDKMCPStrategyRequestContext(
+            with span:
+                context = SDKMCPStrategyRequestContext(
                     project_id=project_id,
-                    current_dag_snapshot=[dict(node) for node in current_dag.get("nodes", [])],
+                    current_dag_snapshot=[dict(n) for n in current_dag.get("nodes", [])],
                     optimization_goal="general_build_efficiency",
-                    additional_mcp_context={"triggering_flow_id": flow_id}
+                    additional_mcp_context={"flow_id": flow_id},
                 )
 
-                mcp_response: SDKMCPStrategyResponse = await self.forgeiq_sdk_client.request_mcp_build_strategy(
-                    context=mcp_request_context  # type: ignore
-                )
+                @SDK_RETRY
+                async def _call():
+                    return await self.forgeiq_sdk_client.request_mcp_build_strategy(
+                        context=context
+                    )
 
-                if mcp_response and mcp_response.get("status") == "strategy_provided" and mcp_response.get("strategy_details"):
-                    strategy_details = mcp_response["strategy_details"]
-                    new_dag_raw = strategy_details.get("new_dag_definition_raw")
+                response: SDKMCPStrategyResponse = await _call()
 
-                    if new_dag_raw and isinstance(new_dag_raw, dict):
-                        validated_new_dag = DagDefinition(**new_dag_raw)  # type: ignore
-                        logger.info(f"Flow {flow_id}: MCP provided optimized DAG '{validated_new_dag.get('dag_id')}' for project '{project_id}'.")
-                        if _trace_api and span:
-                            span.set_attribute("mcp.strategy_id", strategy_details.get("strategy_id"))
-                            span.set_attribute("mcp.new_dag_id", validated_new_dag.get("dag_id"))
+                if response and response.get("status") == "strategy_provided":
+                    details = response.get("strategy_details")
+                    raw_dag = details.get("new_dag_definition_raw") if details else None
+
+                    if raw_dag:
+                        optimized_dag = DagDefinition(**raw_dag)  # type: ignore
+                        await self._update_flow_state(
+                            flow_id,
+                            {"current_stage": f"MCP_OPTIMIZATION_RECEIVED_{optimized_dag.get('dag_id')}"},
+                        )
+
+                        if _trace_api:
+                            span.set_attribute("mcp.strategy_id", details.get("strategy_id"))
                             span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
-                        await self._update_flow_state(flow_id, {"current_stage": f"MCP_OPTIMIZATION_RECEIVED_DAG_{validated_new_dag.get('dag_id')}"})
-                        return validated_new_dag
-                    else:
-                        logger.info(f"Flow {flow_id}: MCP provided strategy but no new DAG definition for project '{project_id}'. Directives: {strategy_details.get('directives')}")
-                        if _trace_api and span:
-                            span.set_attribute("mcp.directives_only", True)
-                else:
-                    msg = f"MCP strategy optimization failed or no strategy provided for project '{project_id}'. Response: {mcp_response}"
-                    logger.warning(f"Flow {flow_id}: {msg}")
-                    if _trace_api and span:
-                        span.set_attribute("mcp.error", msg)
 
-                await self._update_flow_state(flow_id, {"current_stage": f"MCP_OPTIMIZATION_NO_NEW_DAG"})
+                        return optimized_dag
+
+                await self._update_flow_state(
+                    flow_id,
+                    {"current_stage": "MCP_OPTIMIZATION_NO_DAG"},
+                )
+                return None
+
         except Exception as e:
-            logger.error(f"Flow {flow_id}: Error requesting/processing MCP strategy for project '{project_id}': {e}", exc_info=True)
-            await self._update_flow_state(flow_id, {"current_stage": "MCP_OPTIMIZATION_ERROR", "error_message": str(e)})
-            if _trace_api and span:
+            logger.error("MCP optimization failed", exc_info=True)
+            await self._update_flow_state(
+                flow_id,
+                {"current_stage": "MCP_OPTIMIZATION_ERROR", "error_message": str(e)},
+            )
+            if _trace_api:
                 span.record_exception(e)
                 span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR))
-        return None
+            raise OrchestrationError(str(e), flow_id=flow_id, stage="MCP_EXECUTION") from e
+  # --- MCP Subsystems (Single Instances) ---
+        self.mcp_strategy = MCPStrategyEngine()
+        self.mcp_memory = get_mcp_memory()
+        self.mcp_metrics = get_mcp_metrics()
 
-    async def run_full_build_flow(self, project_id: str, commit_sha: str, changed_files_list: List[str], user_prompt_for_pipeline: Optional[str] = None, flow_id_override: Optional[str] = None):
-        flow_id = flow_id_override or f"build_flow_{project_id}_{commit_sha[:7]}_{str(uuid.uuid4())[:4]}"
-        initial_state = OrchestrationFlowState(
-            flow_id=flow_id, flow_name="full_build_flow", project_id=project_id, commit_sha=commit_sha,
-            status="PENDING", current_stage="INITIALIZING", 
-            started_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
-            updated_at=datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z",
-            last_event_id_processed=None, dag_id=None, deployment_request_id=None, error_message=None,
-            context_data={"user_prompt": user_prompt_for_pipeline, "num_changed_files": len(changed_files_list)}
-        )
-        await self._update_flow_state(flow_id, initial_state, initial_state_if_new=initial_state)  # type: ignore
-        logger.info(f"Orchestrator: V0.3 Full Build Flow '{flow_id}' initiated.")
+        logger.info("MCP subsystems initialized (strategy, memory, metrics)")
 
-        span = self._start_trace_span_if_available("run_full_build_flow", project_id=project_id, commit_sha=commit_sha, flow_id=flow_id)
-        try:
-            with span:  # type: ignore
-                await self._update_flow_state(flow_id, {"status": "RUNNING", "current_stage": "AWAITING_AFFECTED_TASKS"})
-                new_commit_event_id = str(uuid.uuid4())
-                commit_payload = {
-                    "event_id": new_commit_event_id, "project_id": project_id, "commit_sha": commit_sha,
-                    "changed_files": [{"file_path": fp, "change_type": "modified"} for fp in changed_files_list],
-                    "timestamp": datetime.datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
-                }
-                await self.message_router.dispatch(logical_message_type="SubmitNewCommit", payload=commit_payload)
-
-                # Wait for affected tasks identification
-                affected_tasks_event = await self._wait_for_event(
-                    expected_event_type="AffectedTasksIdentifiedEvent",
-                    correlation_id=new_commit_event_id,
-                    correlation_id_field_in_event="commit_event_id",
-                    event_channel_pattern=f"project:{project_id}:*",
-                )
-
-                if not affected_tasks_event:
-                    raise OrchestrationError("No AffectedTasksIdentifiedEvent received.", flow_id, "AWAITING_AFFECTED_TASKS")
-
-                # Optionally optimize DAG via MCP after tasks are identified
-                current_dag = affected_tasks_event.get("dag_definition")  # assumed from event
-                if current_dag:
-                    optimized_dag = await self.request_and_apply_mcp_optimization(
-                        project_id=project_id,
-                        current_dag=current_dag,
-                        flow_id=flow_id
-                    )
-                    # Further logic to forward optimized_dag to PlanAgent would follow here.
-
-                await self._update_flow_state(flow_id, {"status": "COMPLETED_SUCCESS", "current_stage": "FLOW_COMPLETE_PLACEHOLDER"})
-                if _tracer and _trace_api:
-                    span.set_status(_trace_api.Status(_trace_api.StatusCode.OK))
-
-        except Exception as e:
-            logger.error(f"Orchestrator: Error in full build flow '{flow_id}': {e}", exc_info=True)
-            await self._update_flow_state(flow_id, {"status": "FAILED", "current_stage": "ORCHESTRATION_ERROR", "error_message": str(e)})
-            if _tracer and _trace_api and span:
-                span.record_exception(e)
-                span.set_status(_trace_api.Status(_trace_api.StatusCode.ERROR, "Full build flow error"))
+        if not forgeiq_sdk_client:
+            logger.warning("ForgeIQ SDK client not provided — MCP optimization via SDK disabled")
+ 
