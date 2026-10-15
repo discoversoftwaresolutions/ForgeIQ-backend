@@ -440,7 +440,7 @@ async def pusher_auth(request: Request):
         resp["channel_data"] = channel_data
     return JSONResponse(resp)
 
-@router.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/build", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 async def trigger_forgeiq_build_pipeline(
     task_payload_from_orchestrator: TaskPayloadFromOrchestrator, 
     db: Session = Depends(get_db)
@@ -497,15 +497,12 @@ async def trigger_forgeiq_build_pipeline(
         "mcp_strategy_applied": mcp_strategy_applied
     }
     
-    @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
     """
     Handles general AI requests asynchronously.
     Accepts context_data.config_options.{ providers: [..], llm_provider: "..." } for LLM routing.
     """
-    if not request_data.prompt or len(request_data.prompt.strip()) == 0:
-        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
     if not request_data.prompt or len(request_data.prompt.strip()) == 0:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
