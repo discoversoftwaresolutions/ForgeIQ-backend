@@ -498,11 +498,14 @@ async def trigger_forgeiq_build_pipeline(
     }
     
     @app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
+@app.post("/gateway", status_code=status.HTTP_202_ACCEPTED)
 async def handle_gateway_request(request_data: UserPromptData, db: Session = Depends(get_db)):
     """
     Handles general AI requests asynchronously.
     Accepts context_data.config_options.{ providers: [..], llm_provider: "..." } for LLM routing.
     """
+    if not request_data.prompt or len(request_data.prompt.strip()) == 0:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
     if not request_data.prompt or len(request_data.prompt.strip()) == 0:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
