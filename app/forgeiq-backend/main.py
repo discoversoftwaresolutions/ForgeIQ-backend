@@ -44,28 +44,7 @@ from tasks.build_tasks import run_forgeiq_pipeline_task
 from tasks.build_tasks import run_pipeline_generation_task
 from tasks.build_tasks import run_deployment_trigger_task
 
-# === Import ForgeIQ's API Models ===
-from .api_models import UserPromptData
-from .api_models import CodeGenerationRequest
-from .api_models import PipelineGenerateRequest
-from .api_models import DeploymentTriggerRequest
-from .api_models import ApplyAlgorithmRequest
-from .api_models import MCPStrategyApiRequest
-from .api_models import MCPStrategyApiResponse
-from .api_models import ProjectConfigResponse
-from .api_models import BuildGraphNodeModel
-from .api_models import BuildGraphResponse
-from .api_models import ForgeIQTaskStatusResponse
-from .api_models import TaskDefinitionModel
-from .api_models import TaskListResponse
-from .api_models import TaskPayloadFromOrchestrator
-from .api_models import SDKMCPStrategyRequestContext
-from .api_models import SDKMCPStrategyResponse
-from .api_models import ApplyAlgorithmResponse
-from .api_models import DemoRequestPayload  # kept for compatibility
-from app.api_models import MCPOptimizeRequest, MCPOptimizeResponse
-from app.utils.mcp_helper import optimize_dag_with_mcp
-from app.utils.mcp_wrapper import apply_mcp_to_payload
+
 
 # === Internal ForgeIQ components ===
 from app.orchestrator import Orchestrator
